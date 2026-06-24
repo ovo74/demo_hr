@@ -4,6 +4,8 @@ import fitz  # PyMuPDF để xử lý PDF ảnh scan
 import easyocr
 import smtplib
 import base64
+import io  # Dùng để xử lý luồng bytes cho ảnh
+from PIL import Image  # Thư viện xử lý ảnh để xóa nền caro giả lập
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -126,10 +128,32 @@ st.markdown("""
 def load_ocr_engine():
     return easyocr.Reader(['vi', 'en'], gpu=False)
 
+# --- FIX LỖI NỀN CARO: THUẬT TOÁN TỰ ĐỘNG KHỬ MACRO CARO SANG TRONG SUỐT ---
 def get_base64_image(image_path):
     try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode()
+        # 1. Mở ảnh và chuyển sang hệ màu RGBA (có kênh Alpha làm trong suốt)
+        img = Image.open(image_path).convert("RGBA")
+        datas = img.getdata()
+        
+        new_data = []
+        for item in datas:
+            r, g, b, a = item[0], item[1], item[2], item[3]
+            
+            # Nếu 3 kênh màu R, G, B gần bằng nhau (màu xám/trắng) và có độ sáng cao (> 180)
+            # Thì đích thị đó là các điểm ảnh tạo nên lưới caro giả lập tách nền.
+            if abs(r - g) < 15 and abs(g - b) < 15 and r > 180:
+                # Ép điểm ảnh đó biến thành màu trắng trong suốt hoàn toàn (Alpha = 0)
+                new_data.append((255, 255, 255, 0))
+            else:
+                new_data.append(item)
+                
+        # 2. Đổ lại tập dữ liệu pixel sạch vào ảnh
+        img.putdata(new_data)
+        
+        # 3. Mã hóa bức ảnh đã xử lý sang định dạng chuỗi Base64
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
     except Exception:
         return None
 
@@ -256,22 +280,18 @@ else:
     uploaded_file = st.file_uploader("Sơ yếu lý lịch / Bằng đại học (Dạng PDF ảnh scan để chạy thử OCR):*", type=["pdf"])
     
     if uploaded_file is not None:
-        # ---- THÊM LOGIC CHẶN DUNG LƯỢNG 5MB TẠI ĐÂY ----
         MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 Megabytes tính bằng Bytes
         
         if uploaded_file.size > MAX_FILE_SIZE:
-            # Hiện dòng chữ cảnh báo màu đỏ chính xác theo yêu cầu
             st.markdown(
                 '<p style="color: #ff4b4b; font-weight: bold; margin-top: 10px; font-size: 14px;">'
                 'file vượt quá dung lượng hãy nộp file dung lượng trong ngưỡng 5mb.'
                 '</p>', 
                 unsafe_allow_html=True
             )
-            # Khóa không cho upload: Reset toàn bộ trạng thái file và kết quả quét về rỗng
             st.session_state.ocr_status = None
             uploaded_file = None
         else:
-            # Nếu dung lượng hợp lệ (< 5MB) mới tiến hành quét OCR dữ liệu
             file_bytes = uploaded_file.read()
             df_rules = get_recruitment_rules()
             
@@ -284,7 +304,6 @@ else:
                 else:
                     st.session_state.ocr_status = "DENY"
     
-    # Hiển thị trạng thái quét hồ sơ ngay dưới phần upload file
     if st.session_state.ocr_status == "APPROVE":
         st.markdown(f"""
             <div class='status-box status-approve'>
@@ -303,7 +322,6 @@ else:
     # ================= KHỐI 2: THÔNG TIN HỒ SƠ (FORM 3 CỘT ĐỂ TRỐNG) =================
     st.markdown("<br/>", unsafe_allow_html=True)
     
-    # Mở mặc định form Thông tin Hồ sơ giống hệt ảnh chụp
     with st.expander("▼ Thông tin Hồ sơ", expanded=True):
         st.caption("Vui lòng điền thông tin cá nhân của bạn. Các trường dấu (*) là bắt buộc.")
         
@@ -343,10 +361,9 @@ else:
         with c2: weight = st.text_input("Cân nặng (kg):", value="")
         with c3: marriage = st.selectbox("Tình trạng hôn nhân:*", ["", "Độc thân", "Đã kết hôn", "Khác"])
         
-        # Hàng 7 - Text Area
+        # Hàng 7
         achievements = st.text_area("Các thành tích nổi bật", value="", help="Kích cỡ câu trả lời phải là 1024 ký tự hoặc ít hơn.")
 
-    # Các cấu trúc thư mục rỗng phía dưới mô phỏng theo thiết kế gốc của VCB
     with st.expander("▶ Kinh nghiệm làm việc"): st.write("Không có dữ liệu lịch sử")
     with st.expander("▶ Trình độ chuyên môn"): st.write("Hệ thống đồng bộ tự động từ mục Bằng Cấp")
     with st.expander("▶ Học vấn THPT"): st.text_input("Trường THPT:", value="")
@@ -356,7 +373,7 @@ else:
     with st.expander("▶ Thông tin gia đình"): st.write("Khai báo thông tin người thân (nếu có)")
     with st.expander("▶ Thông tin Cụ thể về Công việc"): st.write("Nguyện vọng địa bàn làm việc: Khu vực Hà Nội")
 
-    # ================= KHỐI 3: THANH ĐIỀU HƯỚNG NÚT BẤM (XỬ LÝ LOGIC) =================
+    # ================= KHỐI 3: THANH ĐIỀU HƯỚNG NÚT BẤM =================
     st.markdown("<br/>", unsafe_allow_html=True)
     b_col1, b_col2, b_col3, b_col4 = st.columns([1.5, 1.5, 1.5, 1.5])
     
@@ -367,7 +384,6 @@ else:
             st.toast("💾 Đã lưu tạm các thông tin biểu mẫu vào phiên làm việc!", icon="ℹ️")
             
     with b_col4:
-        # XỬ LÝ LOGIC KIỂM TRA ĐIỀU KIỆN KHI ẤN NỘP ĐƠN
         if st.button("Nộp đơn"):
             required_fields = [name_ten, name_ho, gender, dob, pob, address, district, city, country, phone, username, cccd, cccd_date, marriage]
             is_form_filled = all(str(f).strip() != "" for f in required_fields)
