@@ -131,7 +131,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- KHỞI TẠO CACHE ENGINE OCR ---
+# --- KHỔI TẠO CACHE ENGINE OCR ---
 @st.cache_resource
 def load_ocr_engine():
     return easyocr.Reader(['vi', 'en'], gpu=False)
@@ -279,7 +279,7 @@ if not st.session_state.logged_in:
             else:
                 st.error("Vui lòng điền đúng định dạng Email và Mật khẩu!")
 else:
-    # ---------------- MÀN HÌNH ĐIỀN HỒ SƠ VÀ UPLOAD VĂN BẰNG (CHỈ HIỆN KHI ĐÃ ĐĂNG NHẬP) ----------------
+    # ---------------- MÀN HÌNH ĐIỀN HỒ SƠ VÀ UPLOAD VĂN BẰNG ----------------
     st.markdown(f"<div class='vcb-page-title'>[I.2026_Hà Nội] CV khách hàng (kinh nghiệm) (6593)</div>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: right; padding-right:8%; font-size:13px;'>Xin chào: <b>{st.session_state.user_email}</b> | <span style='color:red; cursor:pointer;'>Đăng xuất</span></p>", unsafe_allow_html=True)
     
@@ -379,7 +379,7 @@ else:
     with st.expander("▶ Kinh nghiệm làm việc"): 
         st.write("Không có dữ liệu lịch sử")
         
-    # ================= KHỐI TRÌNH ĐỘ CHUYÊN MÔN (Đã thụt lề vào trong else) =================
+    # ================= KHỐI TRÌNH ĐỘ CHUYÊN MÔN =================
     with st.expander("▼ Trình độ chuyên môn", expanded=True):
         for i, idx in enumerate(st.session_state.cm_items):
             if i > 0:
@@ -425,7 +425,7 @@ else:
                     elif selected_group == "Khối ngành Kỹ thuật":
                         major_options = ["Lựa chọn", "Kỹ thuật điện", "Kỹ thuật cơ khí", "Kỹ thuật xây dựng"]
                     else:
-                        major_options = ["Lựa chọn"]  # Mặc định khi chưa chọn nhóm ngành cụ thể
+                        major_options = ["Lựa chọn"]
                     
                     st.selectbox("Chuyên ngành:*", major_options, key=f"cm_major_select_{idx}")
             
@@ -448,16 +448,23 @@ else:
             with cm_c3: 
                 st.text_input("Tên trường:*", key=f"cm_school_name_{idx}")
             
-            # --- Row 4 ---
+            # --- Row 4 (Đã CẬP NHẬT: Ô Điểm tổng kết tích hợp chọn option hệ điểm) ---
             cm_c1, cm_c2, cm_c3 = st.columns(3)
             with cm_c1: 
                 st.text_input("Thời gian khóa học:*", key=f"cm_duration_{idx}")
             with cm_c2: 
                 st.selectbox("Đơn vị thời gian khóa học:*", ["Lựa chọn", "Năm", "Tháng"], key=f"cm_unit_{idx}")
             with cm_c3: 
-                st.text_input("Điểm tổng kết:*", key=f"cm_gpa_{idx}")
+                # Tạo nhãn gốc cho khu vực điểm tổng kết
+                st.markdown("<label style='color: #111111 !important; font-weight: bold;'>Điểm tổng kết:*</label>", unsafe_allow_html=True)
+                # Chia ô thứ 3 thành 2 cột nhỏ theo tỷ lệ 1:2 (1 phần cho option thang điểm, 2 phần cho ô nhập text điểm số)
+                sub_gpa_c1, sub_gpa_c2 = st.columns([1, 2])
+                with sub_gpa_c1:
+                    st.selectbox("Thang điểm", ["/10", "/4"], key=f"cm_gpa_scale_{idx}", label_visibility="collapsed")
+                with sub_gpa_c2:
+                    st.text_input("Điểm số", placeholder="Nhập điểm...", key=f"cm_gpa_{idx}", label_visibility="collapsed")
             
-            # --- Row 5 (Đã FIX lỗi text_input thành selectbox) ---
+            # --- Row 5 ---
             cm_c1, cm_c2, cm_c3 = st.columns(3)
             with cm_c1: 
                 st.selectbox("Loại hình đào tạo:*", ["Lựa chọn", "Chính quy", "Tại chức", "Liên thông"], key=f"cm_train_type_{idx}")
@@ -485,7 +492,7 @@ else:
     with st.expander("▶ Học vấn THPT"): 
         st.text_input("Trường THPT:", value="")
         
-    # ================= KHỐI TRÌNH ĐỘ NGOẠI NGỮ (Đã thụt lề vào trong else) =================
+    # ================= KHỐI TRÌNH ĐỘ NGOẠI NGỮ =================
     with st.expander("▼ Trình độ ngoại ngữ", expanded=True):
         for j, idx in enumerate(st.session_state.nn_items):
             if j > 0:
