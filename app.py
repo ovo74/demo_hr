@@ -416,7 +416,7 @@ else:
                     )
                 # Nếu chọn các nhóm ngành có sẵn -> Hiển thị Selectbox tương ứng
                 else:
-                    if selected_group == "Khối ngành Kinh tế":
+                    if selected_group == "Khối ngành Kinh tế - Quản lý":
                         major_options = ["Lựa chọn", "Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"]
                     elif selected_group == "Khối ngành CNTT":
                         major_options = ["Lựa chọn", "Trí tuệ nhân tạo", "Khoa học máy tính", "Kỹ thuật máy tính"]
