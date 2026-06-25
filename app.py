@@ -341,7 +341,7 @@ else:
         c1, c2, c3 = st.columns(3)
         with c1: name_ten = st.text_input("Tên:*", value="")
         with c2: name_ho = st.text_input("Họ và tên đệm:*", value="")
-        with c3: gender = st.selectbox("Giới tính:*", ["", "Nam", "Nữ", "Khác"])
+        with c3: gender = st.selectbox("Giới tính:*", ["Lựa chọn", "Nam", "Nữ", "Khác"])
         
         # Hàng 2
         c1, c2, c3 = st.columns(3)
@@ -352,8 +352,8 @@ else:
         # Hàng 3
         c1, c2, c3 = st.columns(3)
         with c1: district = st.text_input("Quận/Huyện:*", value="")
-        with c2: city = st.selectbox("Tỉnh / Thành phố:*", ["", "Hà Nội", "TP. Hồ Chí Minh", "Thái Bình", "Đà Nẵng", "Khác"])
-        with c3: country = st.selectbox("Quốc gia:*", ["", "Việt Nam", "Nước ngoài"])
+        with c2: city = st.selectbox("Tỉnh / Thành phố:*", ["Lựa chọn", "Hà Nội", "TP. Hồ Chí Minh", "Thái Bình", "Đà Nẵng", "Khác"])
+        with c3: country = st.selectbox("Quốc gia:*", ["Lựa chọn", "Việt Nam", "Nước ngoài"])
         
         # Hàng 4
         c1, c2, c3 = st.columns(3)
@@ -371,7 +371,7 @@ else:
         c1, c2, c3 = st.columns(3)
         with c1: height = st.text_input("Chiều cao (cm):", value="")
         with c2: weight = st.text_input("Cân nặng (kg):", value="")
-        with c3: marriage = st.selectbox("Tình trạng hôn nhân:*", ["", "Độc thân", "Đã kết hôn", "Khác"])
+        with c3: marriage = st.selectbox("Tình trạng hôn nhân:*", ["Lựa chọn", "Độc thân", "Đã kết hôn", "Khác"])
         
         # Hàng 7
         achievements = st.text_area("Các thành tích nổi bật", value="", help="Kích cỡ câu trả lời phải là 1024 ký tự hoặc ít hơn.")
