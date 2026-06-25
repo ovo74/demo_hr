@@ -279,7 +279,7 @@ if not st.session_state.logged_in:
             else:
                 st.error("Vui lòng điền đúng định dạng Email và Mật khẩu!")
 else:
-    # ---------------- MÀN HÌNH ĐIỀN HỒ SƠ VÀ UPLOAD VĂN BẰNG ----------------
+    # ---------------- MÀN HÌNH ĐIỀN HỒ SƠ VÀ UPLOAD VĂN BẰNG (CHỈ HIỆN KHI ĐÃ ĐĂNG NHẬP) ----------------
     st.markdown(f"<div class='vcb-page-title'>[I.2026_Hà Nội] CV khách hàng (kinh nghiệm) (6593)</div>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: right; padding-right:8%; font-size:13px;'>Xin chào: <b>{st.session_state.user_email}</b> | <span style='color:red; cursor:pointer;'>Đăng xuất</span></p>", unsafe_allow_html=True)
     
@@ -378,113 +378,114 @@ else:
 
     with st.expander("▶ Kinh nghiệm làm việc"): 
         st.write("Không có dữ liệu lịch sử")
-    
-# ================= THAY ĐỔI 1: TRÌNH ĐỘ CHUYÊN MÔN (BẢN FULL HOÀN CHỈNH) =================
-with st.expander("▼ Trình độ chuyên môn", expanded=True):
-    for i, idx in enumerate(st.session_state.cm_items):
-        if i > 0:
-            st.markdown("<hr style='border: 1px dashed #29B6F6;'/>", unsafe_allow_html=True)
         
-        # --- Row 1 ---
-        cm_c1, cm_c2, cm_c3 = st.columns(3)
-        with cm_c1: 
-            st.text_input("Ngày bắt đầu:*", placeholder="DD/MM/YYYY", key=f"cm_start_{idx}")
-        with cm_c2: 
-            st.text_input("Ngày kết thúc:*", placeholder="DD/MM/YYYY", key=f"cm_end_{idx}")
-        with cm_c3: 
-            st.selectbox("Trình độ:*", ["Lựa chọn", "Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"], key=f"cm_level_{idx}")
-        
-        # --- Row 2 (Xử lý logic ràng buộc chuyên ngành động) ---
-        cm_c1, cm_c2, cm_c3 = st.columns(3)
-        with cm_c1: 
-            st.selectbox("Văn bằng:*", ["Lựa chọn", "Cử nhân", "Kỹ sư", "Khác"], key=f"cm_degree_{idx}")
-        
-        with cm_c2: 
-            selected_group = st.selectbox(
-                "Nhóm chuyên ngành:*", 
-                ["Lựa chọn", "Khối ngành Kinh tế", "Khối ngành CNTT", "Khối ngành Luật", "Khối ngành Kỹ thuật", "Khác"], 
-                key=f"cm_group_{idx}"
-            )
-        
-        with cm_c3:
-            # Nếu chọn "Khác" -> Hiển thị ô Text Input cho người dùng tự nhập
-            if selected_group == "Khác":
-                st.text_input(
-                    "Chuyên ngành:*", 
-                    placeholder="Vui lòng nhập chuyên ngành cụ thể...", 
-                    key=f"cm_major_text_{idx}"
+    # ================= KHỐI TRÌNH ĐỘ CHUYÊN MÔN (Đã thụt lề vào trong else) =================
+    with st.expander("▼ Trình độ chuyên môn", expanded=True):
+        for i, idx in enumerate(st.session_state.cm_items):
+            if i > 0:
+                st.markdown("<hr style='border: 1px dashed #29B6F6;'/>", unsafe_allow_html=True)
+            
+            # --- Row 1 ---
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: 
+                st.text_input("Ngày bắt đầu:*", placeholder="DD/MM/YYYY", key=f"cm_start_{idx}")
+            with cm_c2: 
+                st.text_input("Ngày kết thúc:*", placeholder="DD/MM/YYYY", key=f"cm_end_{idx}")
+            with cm_c3: 
+                st.selectbox("Trình độ:*", ["Lựa chọn", "Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"], key=f"cm_level_{idx}")
+            
+            # --- Row 2 (Xử lý logic ràng buộc chuyên ngành động) ---
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: 
+                st.selectbox("Văn bằng:*", ["Lựa chọn", "Cử nhân", "Kỹ sư", "Khác"], key=f"cm_degree_{idx}")
+            
+            with cm_c2: 
+                selected_group = st.selectbox(
+                    "Nhóm chuyên ngành:*", 
+                    ["Lựa chọn", "Khối ngành Kinh tế", "Khối ngành CNTT", "Khối ngành Luật", "Khối ngành Kỹ thuật", "Khác"], 
+                    key=f"cm_group_{idx}"
                 )
-            # Nếu chọn các nhóm ngành có sẵn -> Hiển thị Selectbox tương ứng
-            else:
-                if selected_group == "Khối ngành Kinh tế":
-                    major_options = ["Lựa chọn", "Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"]
-                elif selected_group == "Khối ngành CNTT":
-                    major_options = ["Lựa chọn", "Trí tuệ nhân tạo", "Khoa học máy tính", "Kỹ thuật máy tính"]
-                elif selected_group == "Khối ngành Luật":
-                    major_options = ["Lựa chọn", "Luật kinh tế", "Luật dân sự", "Luật quốc tế"]
-                elif selected_group == "Khối ngành Kỹ thuật":
-                    major_options = ["Lựa chọn", "Kỹ thuật điện", "Kỹ thuật cơ khí", "Kỹ thuật xây dựng"]
+            
+            with cm_c3:
+                # Nếu chọn "Khác" -> Hiển thị ô Text Input cho người dùng tự nhập
+                if selected_group == "Khác":
+                    st.text_input(
+                        "Chuyên ngành:*", 
+                        placeholder="Vui lòng nhập chuyên ngành cụ thể...", 
+                        key=f"cm_major_text_{idx}"
+                    )
+                # Nếu chọn các nhóm ngành có sẵn -> Hiển thị Selectbox tương ứng
                 else:
-                    major_options = ["Lựa chọn"]  # Mặc định khi chưa chọn nhóm ngành cụ thể
-                
-                st.selectbox("Chuyên ngành:*", major_options, key=f"cm_major_select_{idx}")
-        
-        # --- Row 3 ---
-        cm_c1, cm_c2, cm_c3 = st.columns(3)
-        with cm_c1: 
-            st.selectbox("Quốc gia", ["Lựa chọn", "Việt Nam", "Nước ngoài"], key=f"cm_country_{idx}")
-        with cm_c2: 
-            st.selectbox(
-                "Loại trường:*", 
-                [
-                    "Lựa chọn", 
-                    "Trường Công lập đào tạo trong nước", 
-                    "Trường Dân lập đào tạo trong nước", 
-                    "Trường nước ngoài", 
-                    "Trường liên kết với trường nước ngoài đào tạo trong nước"
-                ], 
-                key=f"cm_school_type_{idx}"
-            )
-        with cm_c3: 
-            st.text_input("Tên trường:*", key=f"cm_school_name_{idx}")
-        
-        # --- Row 4 ---
-        cm_c1, cm_c2, cm_c3 = st.columns(3)
-        with cm_c1: 
-            st.text_input("Thời gian khóa học:*", key=f"cm_duration_{idx}")
-        with cm_c2: 
-            st.selectbox("Đơn vị thời gian khóa học:*", ["Lựa chọn", "Năm", "Tháng"], key=f"cm_unit_{idx}")
-        with cm_c3: 
-            st.text_input("Điểm tổng kết:*", key=f"cm_gpa_{idx}")
-        
-        # --- Row 5 (Đã FIX lỗi text_input thành selectbox) ---
-        cm_c1, cm_c2, cm_c3 = st.columns(3)
-        with cm_c1: 
-            st.selectbox("Loại hình đào tạo:*", ["Lựa chọn", "Chính quy", "Tại chức", "Liên thông"], key=f"cm_train_type_{idx}")
-        with cm_c2: 
-            st.selectbox("Xếp loại:*", ["Lựa chọn", "Xuất sắc", "Giỏi", "Khá", "Trung bình", "Yếu"], key=f"cm_rank_{idx}")
-        with cm_c3: 
-            st.selectbox("Học hàm", ["Lựa chọn", "Không có", "Phó giáo sư", "Giáo sư"], key=f"cm_title_{idx}")
-        
-        # Nút Loại bỏ nằm ở góc phải phía dưới mỗi khối dữ liệu chuyên môn hiện tại
-        col_space, col_btn = st.columns([5, 1])
-        with col_btn:
-            if st.button("🗑 Loại bỏ", key=f"cm_remove_{idx}"):
-                if len(st.session_state.cm_items) > 1:
-                    st.session_state.cm_items.remove(idx)
-                    st.rerun()
-                else:
-                    st.warning("Hệ thống yêu cầu giữ lại ít nhất 1 mục Trình độ chuyên môn!")
+                    if selected_group == "Khối ngành Kinh tế":
+                        major_options = ["Lựa chọn", "Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"]
+                    elif selected_group == "Khối ngành CNTT":
+                        major_options = ["Lựa chọn", "Trí tuệ nhân tạo", "Khoa học máy tính", "Kỹ thuật máy tính"]
+                    elif selected_group == "Khối ngành Luật":
+                        major_options = ["Lựa chọn", "Luật kinh tế", "Luật dân sự", "Luật quốc tế"]
+                    elif selected_group == "Khối ngành Kỹ thuật":
+                        major_options = ["Lựa chọn", "Kỹ thuật điện", "Kỹ thuật cơ khí", "Kỹ thuật xây dựng"]
+                    else:
+                        major_options = ["Lựa chọn"]  # Mặc định khi chưa chọn nhóm ngành cụ thể
+                    
+                    st.selectbox("Chuyên ngành:*", major_options, key=f"cm_major_select_{idx}")
+            
+            # --- Row 3 ---
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: 
+                st.selectbox("Quốc gia", ["Lựa chọn", "Việt Nam", "Nước ngoài"], key=f"cm_country_{idx}")
+            with cm_c2: 
+                st.selectbox(
+                    "Loại trường:*", 
+                    [
+                        "Lựa chọn", 
+                        "Trường Công lập đào tạo trong nước", 
+                        "Trường Dân lập đào tạo trong nước", 
+                        "Trường nước ngoài", 
+                        "Trường liên kết với trường nước ngoài đào tạo trong nước"
+                    ], 
+                    key=f"cm_school_type_{idx}"
+                )
+            with cm_c3: 
+                st.text_input("Tên trường:*", key=f"cm_school_name_{idx}")
+            
+            # --- Row 4 ---
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: 
+                st.text_input("Thời gian khóa học:*", key=f"cm_duration_{idx}")
+            with cm_c2: 
+                st.selectbox("Đơn vị thời gian khóa học:*", ["Lựa chọn", "Năm", "Tháng"], key=f"cm_unit_{idx}")
+            with cm_c3: 
+                st.text_input("Điểm tổng kết:*", key=f"cm_gpa_{idx}")
+            
+            # --- Row 5 (Đã FIX lỗi text_input thành selectbox) ---
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: 
+                st.selectbox("Loại hình đào tạo:*", ["Lựa chọn", "Chính quy", "Tại chức", "Liên thông"], key=f"cm_train_type_{idx}")
+            with cm_c2: 
+                st.selectbox("Xếp loại:*", ["Lựa chọn", "Xuất sắc", "Giỏi", "Khá", "Trung bình", "Yếu"], key=f"cm_rank_{idx}")
+            with cm_c3: 
+                st.selectbox("Học hàm", ["Lựa chọn", "Không có", "Phó giáo sư", "Giáo sư"], key=f"cm_title_{idx}")
+            
+            # Nút Loại bỏ nằm ở góc phải phía dưới mỗi khối dữ liệu chuyên môn hiện tại
+            col_space, col_btn = st.columns([5, 1])
+            with col_btn:
+                if st.button("🗑 Loại bỏ", key=f"cm_remove_{idx}"):
+                    if len(st.session_state.cm_items) > 1:
+                        st.session_state.cm_items.remove(idx)
+                        st.rerun()
+                    else:
+                        st.warning("Hệ thống yêu cầu giữ lại ít nhất 1 mục Trình độ chuyên môn!")
 
-    # Nút Thêm mục mới nằm ở cuối khu vực Danh sách văn bằng
-    if st.button("⊕ Thêm", key="cm_add_new"):
-        st.session_state.cm_items.append(st.session_state.cm_counter)
-        st.session_state.cm_counter += 1
-        st.rerun()
+        # Nút Thêm mục mới nằm ở cuối khu vực Danh sách văn bằng
+        if st.button("⊕ Thêm", key="cm_add_new"):
+            st.session_state.cm_items.append(st.session_state.cm_counter)
+            st.session_state.cm_counter += 1
+            st.rerun()
+
     with st.expander("▶ Học vấn THPT"): 
         st.text_input("Trường THPT:", value="")
         
-    # ================= THAY ĐỔI 2: TRÌNH ĐỘ NGOẠI NGỮ (THEO ẢNH 2) =================
+    # ================= KHỐI TRÌNH ĐỘ NGOẠI NGỮ (Đã thụt lề vào trong else) =================
     with st.expander("▼ Trình độ ngoại ngữ", expanded=True):
         for j, idx in enumerate(st.session_state.nn_items):
             if j > 0:
@@ -549,6 +550,7 @@ with st.expander("▼ Trình độ chuyên môn", expanded=True):
                     </div>
                 """, unsafe_allow_html=True)
 
+    # Nút Đăng xuất ở sidebar chỉ xuất hiện khi đã đăng nhập
     if st.sidebar.button("Đăng xuất (Reset Test)"):
         st.session_state.logged_in = False
         st.session_state.user_email = ""
