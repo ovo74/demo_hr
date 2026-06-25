@@ -402,7 +402,7 @@ else:
             with cm_c2: 
                 selected_group = st.selectbox(
                     "Nhóm chuyên ngành:*", 
-                    ["Lựa chọn", "Khối ngành Kinh tế", "Khối ngành CNTT", "Khối ngành Luật", "Khối ngành Kỹ thuật", "Khác"], 
+                    ["Lựa chọn", "Khối ngành Kinh tế - Quản lý", "Khối ngành CNTT", "Khối ngành Luật", "Khối ngành Kỹ thuật", "Khác"], 
                     key=f"cm_group_{idx}"
                 )
             
