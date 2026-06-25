@@ -119,7 +119,15 @@ st.markdown("""
         color: #111111 !important;
         border: 1px solid #CFD8DC !important;
     }
-                   
+
+    /* CSS tinh chỉnh riêng cho nút Loại bỏ nằm sát lề phải giống ảnh mẫu */
+    .remove-btn-container {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 10px;
+        margin-bottom: 15px;
+    }
+                       
     </style>
 """, unsafe_allow_html=True)
 
@@ -131,26 +139,19 @@ def load_ocr_engine():
 # --- FIX LỖI NỀN CARO: THUẬT TOÁN TỰ ĐỘNG KHỬ MACRO CARO SANG TRONG SUỐT ---
 def get_base64_image(image_path):
     try:
-        # 1. Mở ảnh và chuyển sang hệ màu RGBA (có kênh Alpha làm trong suốt)
         img = Image.open(image_path).convert("RGBA")
         datas = img.getdata()
         
         new_data = []
         for item in datas:
             r, g, b, a = item[0], item[1], item[2], item[3]
-            
-            # Nếu 3 kênh màu R, G, B gần bằng nhau (màu xám/trắng) và có độ sáng cao (> 180)
-            # Thì đích thị đó là các điểm ảnh tạo nên lưới caro giả lập tách nền.
             if abs(r - g) < 15 and abs(g - b) < 15 and r > 180:
-                # Ép điểm ảnh đó biến thành màu trắng trong suốt hoàn toàn (Alpha = 0)
                 new_data.append((255, 255, 255, 0))
             else:
                 new_data.append(item)
                 
-        # 2. Đổ lại tập dữ liệu pixel sạch vào ảnh
         img.putdata(new_data)
         
-        # 3. Mã hóa bức ảnh đã xử lý sang định dạng chuỗi Base64
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode()
@@ -217,11 +218,22 @@ if 'logged_in' not in st.session_state:
 if 'user_email' not in st.session_state:
     st.session_state.user_email = ""
 if 'ocr_status' not in st.session_state:
-    st.session_state.ocr_status = None # None, "APPROVE", "DENY"
+    st.session_state.ocr_status = None 
 if 'ocr_school' not in st.session_state:
     st.session_state.ocr_school = ""
 if 'ocr_major' not in st.session_state:
     st.session_state.ocr_major = ""
+
+# Khởi tạo danh sách động cho Trình độ chuyên môn và Trình độ ngoại ngữ
+if 'cm_items' not in st.session_state:
+    st.session_state.cm_items = [0]
+if 'cm_counter' not in st.session_state:
+    st.session_state.cm_counter = 1
+
+if 'nn_items' not in st.session_state:
+    st.session_state.nn_items = [0]
+if 'nn_counter' not in st.session_state:
+    st.session_state.nn_counter = 1
 
 # --- DỰNG LOGO OFFLINE BASE64 HOẶC DỰ PHÒNG ONLINE ---
 logo_base64 = get_base64_image("vcblogo.png")
@@ -280,7 +292,7 @@ else:
     uploaded_file = st.file_uploader("Sơ yếu lý lịch / Bằng đại học (Dạng PDF ảnh scan để chạy thử OCR):*", type=["pdf"])
     
     if uploaded_file is not None:
-        MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 Megabytes tính bằng Bytes
+        MAX_FILE_SIZE = 5 * 1024 * 1024
         
         if uploaded_file.size > MAX_FILE_SIZE:
             st.markdown(
@@ -319,7 +331,7 @@ else:
             </div>
         """, unsafe_allow_html=True)
 
-    # ================= KHỐI 2: THÔNG TIN HỒ SƠ (FORM 3 CỘT ĐỂ TRỐNG) =================
+    # ================= KHỐI 2: THÔNG TIN HỒ SƠ =================
     st.markdown("<br/>", unsafe_allow_html=True)
     
     with st.expander("▼ Thông tin Hồ sơ", expanded=True):
@@ -364,14 +376,95 @@ else:
         # Hàng 7
         achievements = st.text_area("Các thành tích nổi bật", value="", help="Kích cỡ câu trả lời phải là 1024 ký tự hoặc ít hơn.")
 
-    with st.expander("▶ Kinh nghiệm làm việc"): st.write("Không có dữ liệu lịch sử")
-    with st.expander("▶ Trình độ chuyên môn"): st.write("Hệ thống đồng bộ tự động từ mục Bằng Cấp")
-    with st.expander("▶ Học vấn THPT"): st.text_input("Trường THPT:", value="")
-    with st.expander("▶ Trình độ ngoại ngữ"): st.selectbox("Chứng chỉ Tiếng Anh:", ["", "IELTS", "TOEIC", "TOEFL"])
+    with st.expander("▶ Kinh nghiệm làm việc"): 
+        st.write("Không có dữ liệu lịch sử")
+    
+    # ================= THAY ĐỔI 1: TRÌNH ĐỘ CHUYÊN MÔN (THEO ẢNH 1) =================
+    with st.expander("▼ Trình độ chuyên môn", expanded=True):
+        for i, idx in enumerate(st.session_state.cm_items):
+            if i > 0:
+                st.markdown("<hr style='border: 1px dashed #29B6F6;'/>", unsafe_allow_html=True)
+            
+            # Row 1
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: st.text_input("Ngày bắt đầu:*", placeholder="DD/MM/YYYY", key=f"cm_start_{idx}")
+            with cm_c2: st.text_input("Ngày kết thúc:*", placeholder="DD/MM/YYYY", key=f"cm_end_{idx}")
+            with cm_c3: st.selectbox("Trình độ:*", ["Lựa chọn", "Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"], key=f"cm_level_{idx}")
+            
+            # Row 2
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: st.selectbox("Văn bằng:*", ["Lựa chọn", "Cử nhân", "Kỹ sư", "Bằng tốt nghiệp"], key=f"cm_degree_{idx}")
+            with cm_c2: st.selectbox("Nhóm chuyên ngành:*", ["Lựa chọn", "Khối ngành Kinh tế", "Khối ngành CNTT", "Khối ngành Kỹ thuật"], key=f"cm_group_{idx}")
+            with cm_c3: st.selectbox("Chuyên ngành:*", ["Lựa chọn", "Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"], key=f"cm_major_{idx}")
+            
+            # Row 3
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: st.selectbox("Quốc gia", ["Lựa chọn", "Việt Nam", "Nước ngoài"], key=f"cm_country_{idx}")
+            with cm_c2: st.selectbox("Loại trường:*", ["Lựa chọn", "Công lập", "Dân lập", "Quốc tế"], key=f"cm_school_type_{idx}")
+            with cm_c3: st.text_input("Tên trường:*", key=f"cm_school_name_{idx}")
+            
+            # Row 4
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: st.text_input("Thời gian khóa học:*", key=f"cm_duration_{idx}")
+            with cm_c2: st.selectbox("Đơn vị thời gian khóa học:*", ["Lựa chọn", "Năm", "Tháng"], key=f"cm_unit_{idx}")
+            with cm_c3: st.text_input("Điểm tổng kết:*", key=f"cm_gpa_{idx}")
+            
+            # Row 5
+            cm_c1, cm_c2, cm_c3 = st.columns(3)
+            with cm_c1: st.selectbox("Loại hình đào tạo:*", ["Lựa chọn", "Chính quy", "Tại chức", "Liên thông"], key=f"cm_train_type_{idx}")
+            with cm_c2: st.text_input("Xếp loại:*", key=f"cm_rank_{idx}")
+            with cm_c3: st.selectbox("Học hàm", ["Lựa chọn", "Không có", "Phó giáo sư", "Giáo sư"], key=f"cm_title_{idx}")
+            
+            # Nút Loại bỏ căn phải lề dưới khối dữ liệu chuyên môn hiện tại
+            col_space, col_btn = st.columns([5, 1])
+            with col_btn:
+                if st.button("🗑 Loại bỏ", key=f"cm_remove_{idx}"):
+                    if len(st.session_state.cm_items) > 1:
+                        st.session_state.cm_items.remove(idx)
+                        st.rerun()
+                    else:
+                        st.warning("Hệ thống yêu cầu giữ lại ít nhất 1 mục Trình độ chuyên môn!")
+
+        # Nút Thêm căn trái phía cuối khu vực danh sách văn bằng
+        if st.button("⊕ Thêm", key="cm_add_new"):
+            st.session_state.cm_items.append(st.session_state.cm_counter)
+            st.session_state.cm_counter += 1
+            st.rerun()
+
+    with st.expander("▶ Học vấn THPT"): 
+        st.text_input("Trường THPT:", value="")
+        
+    # ================= THAY ĐỔI 2: TRÌNH ĐỘ NGOẠI NGỮ (THEO ẢNH 2) =================
+    with st.expander("▼ Trình độ ngoại ngữ", expanded=True):
+        for j, idx in enumerate(st.session_state.nn_items):
+            if j > 0:
+                st.markdown("<hr style='border: 1px dashed #29B6F6;'/>", unsafe_allow_html=True)
+            
+            # Ma trận 3 cột chuẩn ảnh số 2
+            nn_c1, nn_c2, nn_c3 = st.columns(3)
+            with nn_c1: st.selectbox("Ngôn ngữ:*", ["Lựa chọn", "Tiếng Anh", "Tiếng Trung", "Tiếng Nhật", "Tiếng Hàn"], key=f"nn_lang_{idx}")
+            with nn_c2: st.selectbox("Chứng chỉ ngoại ngữ:*", ["Lựa chọn", "IELTS", "TOEIC", "TOEFL", "Hsk", "JLPT"], key=f"nn_cert_{idx}")
+            with nn_c3: st.text_input("Điểm ngoại ngữ", key=f"nn_score_{idx}")
+            
+            # Nút Loại bỏ căn phải lề dưới khối dữ liệu ngoại ngữ hiện tại
+            col_space_nn, col_btn_nn = st.columns([5, 1])
+            with col_btn_nn:
+                if st.button("🗑 Loại bỏ", key=f"nn_remove_{idx}"):
+                    if len(st.session_state.nn_items) > 1:
+                        st.session_state.nn_items.remove(idx)
+                        st.rerun()
+                    else:
+                        st.warning("Hệ thống yêu cầu giữ lại ít nhất 1 mục Trình độ ngoại ngữ!")
+
+        # Nút Thêm căn trái phía cuối khu vực danh sách ngoại ngữ
+        if st.button("⊕ Thêm", key="nn_add_new"):
+            st.session_state.nn_items.append(st.session_state.nn_counter)
+            st.session_state.nn_counter += 1
+            st.rerun()
+
     with st.expander("▶ Kỹ năng tin học"): st.checkbox("MOS / IC3 / Bằng Tin học văn phòng ứng dụng")
     with st.expander("▶ Nghiên cứu khoa học"): st.write("Không có tài liệu đính kèm")
     with st.expander("▶ Thông tin gia đình"): st.write("Khai báo thông tin người thân (nếu có)")
-    with st.expander("▶ Thông tin Cụ thể về Công việc"): st.write("Nguyện vọng địa bàn làm việc: Khu vực Hà Nội")
 
     # ================= KHỐI 3: THANH ĐIỀU HƯỚNG NÚT BẤM =================
     st.markdown("<br/>", unsafe_allow_html=True)
@@ -412,4 +505,8 @@ else:
         st.session_state.ocr_status = None
         st.session_state.ocr_school = ""
         st.session_state.ocr_major = ""
+        st.session_state.cm_items = [0]
+        st.session_state.nn_items = [0]
+        st.session_state.cm_counter = 1
+        st.session_state.nn_counter = 1
         st.rerun()
