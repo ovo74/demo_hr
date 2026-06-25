@@ -280,7 +280,7 @@ if not st.session_state.logged_in:
                 st.error("Vui lòng điền đúng định dạng Email và Mật khẩu!")
 else:
     # ---------------- MÀN HÌNH ĐIỀN HỒ SƠ VÀ UPLOAD VĂN BẰNG ----------------
-    st.markdown(f"<div class='vcb-page-title'>[I.2026_Hà Nội] CV khách hàng (kinh nghiệm) (6593)</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='vcb-page-title'>[I.2026_Sở Giao dịch] CV khách hàng (kinh nghiệm) (6593)</div>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: right; padding-right:8%; font-size:13px;'>Xin chào: <b>{st.session_state.user_email}</b> | <span style='color:red; cursor:pointer;'>Đăng xuất</span></p>", unsafe_allow_html=True)
     
     st.markdown("<div class='login-container' style='max-width:92%; margin-bottom:15px;'>Xin chào anh/chị, Cảm ơn anh/chị đã quan tâm đến công tác tuyển dụng tại Vietcombank. Vui lòng hoàn tất mẫu thông tin cá nhân dưới đây và đính kèm bằng đại học (ảnh/pdf) để thực hiện đối soát điều kiện tự động.</div>", unsafe_allow_html=True)
