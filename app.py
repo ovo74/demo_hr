@@ -10,7 +10,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
-from database import init_db, lay_hoac_tao_ung_vien, luu_ho_so, kiem_tra_email_da_nop
+from database import init_db, lay_hoac_tao_ung_vien, luu_ho_so, kiem_tra_email_da_nop, EmailDaTonTaiError
 
 # Khởi tạo database ngay khi app chạy (tạo bảng nếu chưa có)
 init_db()
@@ -286,7 +286,7 @@ else:
     st.markdown("<div class='vcb-upload-note'>Các loại tệp được chấp nhận: DOCX, PDF, Hình ảnh và Văn bản</div>", unsafe_allow_html=True)
 
     uploaded_file = st.file_uploader(
-        "Sơ yếu lý lịch / Bằng đại học (Dạng PDF ảnh scan để chạy thử OCR):*",
+        "Sơ yếu lý lịch / Bằng đại học (Dạng PDF ảnh scan):",
         type=["pdf"]
     )
 
@@ -311,18 +311,11 @@ else:
                 else:
                     st.session_state.ocr_status = "DENY"
 
-    if st.session_state.ocr_status == "APPROVE":
-        st.markdown(f"""
-            <div class='status-box status-approve'>
-                ✅ STATUS: APPROVE <br/>
-                Hợp lệ: Đã tìm thấy văn bằng đạt tiêu chuẩn thuộc Trường: [{st.session_state.ocr_school}] - Chuyên ngành: [{st.session_state.ocr_major}].
-            </div>
-        """, unsafe_allow_html=True)
-    elif st.session_state.ocr_status == "DENY":
+    if st.session_state.ocr_status is not None:
         st.markdown("""
-            <div class='status-box status-deny'>
-                ❌ STATUS: DENY <br/>
-                Cảnh báo: Tệp tin tải lên không chứa thông tin Trường hoặc Chuyên ngành nằm trong danh sách xét tuyển ưu tiên.
+            <div style='background:#E3F2FD;border-left:4px solid #29B6F6;padding:10px 15px;
+                        border-radius:4px;margin-top:8px;font-size:13px;color:#0D47A1;'>
+                ✅ Hệ thống đã tiếp nhận và xử lý tệp đính kèm thành công.
             </div>
         """, unsafe_allow_html=True)
 
@@ -509,11 +502,7 @@ else:
                 str(f).strip() not in ("", "Lựa chọn") for f in required_fields
             )
 
-            if st.session_state.ocr_status is None:
-                st.error("❌ Bạn chưa đính kèm tài liệu Văn bằng/CV hoặc file tải lên chưa đúng quy chuẩn!")
-            elif st.session_state.ocr_status == "DENY":
-                st.error("❌ Không thể nộp đơn: Văn bằng đính kèm không đáp ứng điều kiện lọc tự động (STATUS: DENY).")
-            elif not is_form_filled:
+            if not is_form_filled:
                 st.error("❌ Không thể nộp đơn: Bạn bỏ sót một hoặc nhiều trường bắt buộc (*). Hãy điền đầy đủ.")
             elif kiem_tra_email_da_nop(username):
                 st.error(
@@ -614,6 +603,11 @@ else:
                         </div>
                     """, unsafe_allow_html=True)
 
+                except EmailDaTonTaiError as e:
+                    st.error(
+                        f"❌ **Email đã được sử dụng!** {e} "
+                        "Vui lòng kiểm tra lại hoặc liên hệ bộ phận tuyển dụng nếu cần hỗ trợ."
+                    )
                 except Exception as e:
                     st.error(f"❌ Lỗi khi lưu hồ sơ vào database: {e}")
 
