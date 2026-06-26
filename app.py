@@ -580,11 +580,10 @@ else:
 
                 # ── Ghi vào database ──
                 try:
-                    # Bảo vệ: nếu session mất ung_vien_id thì lấy lại từ email
-                    if not st.session_state.ung_vien_id:
-                        st.session_state.ung_vien_id = lay_hoac_tao_ung_vien(
-                            st.session_state.user_email or username
-                        )
+                    # Luôn đảm bảo ung_vien tồn tại trong DB hiện tại
+                    # (phòng Streamlit Cloud reset filesystem hoặc session mất)
+                    email_luu = st.session_state.user_email or username
+                    st.session_state.ung_vien_id = lay_hoac_tao_ung_vien(email_luu)
 
                     ho_so_id = luu_ho_so(
                         ung_vien_id   = st.session_state.ung_vien_id,
