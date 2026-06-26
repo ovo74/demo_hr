@@ -2,6 +2,11 @@ import sqlite3
 import hashlib
 import os
 
+
+class EmailDaTonTaiError(Exception):
+    """Raise khi email đã có hồ sơ trong DB — dùng để hiển thị lỗi thân thiện ở app.py."""
+    pass
+
 # Đường dẫn tuyệt đối — luôn trỏ đúng file dù chạy từ terminal nào
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_hr.db")
 
@@ -147,6 +152,16 @@ def luu_ho_so(
     cur = conn.cursor()
 
     try:
+        # -- Kiểm tra trùng: 1 ung_vien chỉ được có 1 ho_so --
+        existing = cur.execute(
+            "SELECT id FROM ho_so WHERE ung_vien_id = ? LIMIT 1", (ung_vien_id,)
+        ).fetchone()
+        if existing:
+            raise EmailDaTonTaiError(
+                f"Hồ sơ của tài khoản này đã tồn tại (mã hồ sơ #{existing['id']}). "
+                "Mỗi email chỉ được nộp một hồ sơ duy nhất."
+            )
+
         # -- Hồ sơ chính --
         cur.execute("""
             INSERT INTO ho_so (
