@@ -256,7 +256,7 @@ if not st.session_state.logged_in:
         st.markdown("<p style='text-align:right;margin-top:10px;font-size:14px;'><b>Địa chỉ Email:*</b></p>", unsafe_allow_html=True)
         st.markdown("<p style='text-align:right;margin-top:25px;font-size:14px;'><b>Mật khẩu:*</b></p>", unsafe_allow_html=True)
     with col_r:
-        email_input = st.text_input("email", label_visibility="collapsed", placeholder="thaiq742@gmail.com")
+        email_input = st.text_input("email", label_visibility="collapsed", placeholder="email")
         pass_input  = st.text_input("pass",  label_visibility="collapsed", type="password")
 
         if st.button("Đăng nhập"):
