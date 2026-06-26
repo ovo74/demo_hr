@@ -526,8 +526,7 @@ else:
             "Ngoại ngữ":   nn0.get("ngon_ngu", "—"),
             "Chứng chỉ":   nn0.get("chung_chi", "—"),
             "Điểm NN":     nn0.get("diem", "—"),
-            "Trạng thái":  SLABEL.get(rec["computed_status"], rec["computed_status"]),
-            "👁 Chi tiết":  "🔍 Xem",
+            "Trạng thái":  SLABEL.get(rec["computed_status"], rec["computed_status"])
         })
 
     df_display = pd.DataFrame(rows)
@@ -555,8 +554,7 @@ else:
             "Ngoại ngữ":    st.column_config.TextColumn("Ngoại ngữ", width=80),
             "Chứng chỉ":    st.column_config.TextColumn("Chứng chỉ", width=80),
             "Điểm NN":      st.column_config.TextColumn("Điểm NN", width=65),
-            "Trạng thái":   st.column_config.TextColumn("Trạng thái", width=130),
-            "👁 Chi tiết":  st.column_config.TextColumn("Chi tiết", width=80),
+            "Trạng thái":   st.column_config.TextColumn("Trạng thái", width=130)
         },
         selection_mode="single-row",
         on_select="rerun",
