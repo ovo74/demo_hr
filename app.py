@@ -10,7 +10,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
-from database import init_db, lay_hoac_tao_ung_vien, luu_ho_so
+from database import init_db, lay_hoac_tao_ung_vien, luu_ho_so, kiem_tra_email_da_nop
 
 # Khởi tạo database ngay khi app chạy (tạo bảng nếu chưa có)
 init_db()
@@ -515,6 +515,12 @@ else:
                 st.error("❌ Không thể nộp đơn: Văn bằng đính kèm không đáp ứng điều kiện lọc tự động (STATUS: DENY).")
             elif not is_form_filled:
                 st.error("❌ Không thể nộp đơn: Bạn bỏ sót một hoặc nhiều trường bắt buộc (*). Hãy điền đầy đủ.")
+            elif kiem_tra_email_da_nop(username):
+                st.error(
+                    f"❌ Email **{username}** đã được sử dụng để nộp hồ sơ trước đó. "
+                    "Mỗi địa chỉ email chỉ được đăng ký cho một ứng viên duy nhất. "
+                    "Vui lòng kiểm tra lại hoặc liên hệ bộ phận tuyển dụng nếu cần hỗ trợ."
+                )
             else:
                 # ── Thu thập thông tin hồ sơ chính ──
                 thong_tin = {

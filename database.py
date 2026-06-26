@@ -211,3 +211,20 @@ def luu_ho_so(
         raise e
     finally:
         conn.close()
+
+
+def kiem_tra_email_da_nop(email: str) -> bool:
+    """
+    Trả về True nếu email này đã có hồ sơ được nộp trong DB.
+    Dùng để chặn trùng email khi ứng viên bấm Nộp đơn.
+    """
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT h.id
+        FROM ho_so h
+        JOIN ung_vien u ON u.id = h.ung_vien_id
+        WHERE u.email = ?
+        LIMIT 1
+    """, (email,)).fetchone()
+    conn.close()
+    return row is not None
