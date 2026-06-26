@@ -256,7 +256,7 @@ if not st.session_state.logged_in:
         st.markdown("<p style='text-align:right;margin-top:10px;font-size:14px;'><b>Địa chỉ Email:*</b></p>", unsafe_allow_html=True)
         st.markdown("<p style='text-align:right;margin-top:25px;font-size:14px;'><b>Mật khẩu:*</b></p>", unsafe_allow_html=True)
     with col_r:
-        email_input = st.text_input("email", label_visibility="collapsed", placeholder="email")
+        email_input = st.text_input("email", label_visibility="collapsed", placeholder="thaiq742@gmail.com")
         pass_input  = st.text_input("pass",  label_visibility="collapsed", type="password")
 
         if st.button("Đăng nhập"):
@@ -580,6 +580,12 @@ else:
 
                 # ── Ghi vào database ──
                 try:
+                    # Bảo vệ: nếu session mất ung_vien_id thì lấy lại từ email
+                    if not st.session_state.ung_vien_id:
+                        st.session_state.ung_vien_id = lay_hoac_tao_ung_vien(
+                            st.session_state.user_email or username
+                        )
+
                     ho_so_id = luu_ho_so(
                         ung_vien_id   = st.session_state.ung_vien_id,
                         thong_tin     = thong_tin,
