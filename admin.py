@@ -123,6 +123,10 @@ def save_status(hid, status):
     conn.close()
 
 def bulk_save(records):
+    """Lưu trạng thái cuối cùng vào DB.
+    Ưu tiên trang_thai do admin đã set thủ công;
+    chỉ dùng computed_status khi trang_thai chưa được ghi (None/rỗng).
+    """
     conn = get_conn()
     for r in records:
         # Nếu admin đã ghi đè thủ công → giữ nguyên quyết định đó
@@ -141,6 +145,26 @@ def bulk_save(records):
 # ─────────────────────────────────────────────────────────────────────
 FOREIGN = ["nước ngoài", "quốc tế", "international", "foreign"]
 
+# Vị trí: Chuyên viên khách hàng
+# Nhóm chuyên ngành được chấp nhận
+NHOM_CHAP_NHAN = ["kinh tế - quản lý", "kinh te - quan ly"]
+CHUYEN_NGANH_LUAT_CHAP_NHAN = ["luật kinh tế", "luat kinh te"]
+
+# Với trường công lập trong nước: chỉ chấp nhận 4 trường
+TRUONG_CONG_LAP_OK = [
+    "kinh tế quốc dân", "neu",           # NEU
+    "ngoại thương", "ftu",               # FTU
+    "học viện tài chính", "aof",         # AOF
+    "học viện ngân hàng", "ba",          # BA
+]
+LOAI_TRUONG_CONG_LAP = "trường công lập đào tạo trong nước"
+
+# Điều kiện phỏng vấn thẳng (ngoại ngữ)
+PHONG_VAN_IELTS  = 7.0
+PHONG_VAN_TOEIC  = 785
+PHONG_VAN_TOEFL  = 550
+
+
 def parse_date(s):
     if not s:
         return None
@@ -151,11 +175,34 @@ def parse_date(s):
             pass
     return None
 
-def compute_status(c, ds_cm):
-    """Trả về (computed_status, [lý do deny])."""
+
+def check_language_phong_van(ds_nn: list) -> bool:
+    """True nếu có ít nhất 1 chứng chỉ đạt ngưỡng phỏng vấn."""
+    for nn in ds_nn:
+        cc  = (nn.get("chung_chi") or "").upper()
+        try:
+            diem = float(str(nn.get("diem") or "0").replace(",", "."))
+        except Exception:
+            continue
+        if "IELTS" in cc and diem > PHONG_VAN_IELTS:
+            return True
+        if "TOEIC" in cc and diem > PHONG_VAN_TOEIC:
+            return True
+        if "TOEFL" in cc and diem > PHONG_VAN_TOEFL:
+            return True
+    return False
+
+
+def compute_status(c, ds_cm, ds_nn=None):
+    """Trả về (computed_status, [lý do deny]).
+    Thứ tự ưu tiên: deny → cho_duyet → phong_van → approve
+    """
+    ds_nn = ds_nn or []
     reasons = []
     today   = date.today()
+    one_year_ago = date(today.year - 1, today.month, today.day)
 
+    # ── 1. Tuổi ──
     dob = parse_date(c.get("ngay_sinh"))
     if dob:
         age = (today - dob).days / 365.25
@@ -164,21 +211,33 @@ def compute_status(c, ds_cm):
     else:
         reasons.append("Không xác định ngày sinh")
 
-    recheck = False
-    for cm in ds_cm:
-        td    = (cm.get("trinh_do") or "").strip()
-        lh    = (cm.get("loai_hinh_dao_tao") or "").strip()
-        diem  = (cm.get("diem_tong_ket") or "").strip()
-        thang = (cm.get("thang_diem") or "").strip()
-        qg    = (cm.get("quoc_gia") or "").strip().lower()
-        lt    = (cm.get("loai_truong") or "").strip().lower()
+    recheck       = False
+    is_phong_van  = True   # bắt đầu True, loại dần
+    xet_phong_van_xep_loai  = False
+    xet_phong_van_ngay      = False
 
+    for cm in ds_cm:
+        td     = (cm.get("trinh_do") or "").strip()
+        lh     = (cm.get("loai_hinh_dao_tao") or "").strip()
+        diem   = (cm.get("diem_tong_ket") or "").strip()
+        thang  = (cm.get("thang_diem") or "").strip()
+        qg     = (cm.get("quoc_gia") or "").strip().lower()
+        lt     = (cm.get("loai_truong") or "").strip()
+        lt_low = lt.lower()
+        truong = (cm.get("ten_truong") or "").strip().lower()
+        nhom   = (cm.get("nhom_chuyen_nganh") or "").strip().lower()
+        cn     = (cm.get("chuyen_nganh") or "").strip().lower()
+        xep    = (cm.get("xep_loai") or "").strip().lower()
+        ngay_kt = parse_date(cm.get("ngay_ket_thuc"))
+
+        # ── 2. Trình độ ──
         if "cao đẳng" in td.lower():
             reasons.append("Trình độ Cao đẳng không hợp lệ")
 
+        # ── 3. Điểm tổng kết ──
         try:
             if "/" in diem:
-                p = diem.split("/")
+                p  = diem.split("/")
                 dv = float(p[0].replace(",", "."))
                 sc = float(p[1].replace(",", "."))
                 if sc >= 9 and dv < 6.5:
@@ -194,16 +253,49 @@ def compute_status(c, ds_cm):
         except Exception:
             pass
 
+        # ── 4. Loại hình đào tạo ──
         if lh and "chính quy" not in lh.lower():
             reasons.append(f"Loại hình '{lh}' không phải Chính quy")
 
-        if any(k in qg for k in FOREIGN) or any(k in lt for k in FOREIGN):
+        # ── 5. Nhóm chuyên ngành (YC vị trí Chuyên viên KH) ──
+        ok_nhom = any(k in nhom for k in NHOM_CHAP_NHAN)
+        ok_luat = ("luật" in nhom) and any(k in cn for k in CHUYEN_NGANH_LUAT_CHAP_NHAN)
+        if nhom and not ok_nhom and not ok_luat:
+            reasons.append(
+                f"Nhóm chuyên ngành '{cm.get('nhom_chuyen_nganh')}' "
+                f"không phù hợp vị trí Chuyên viên Khách hàng"
+            )
+
+        # ── 6. Tên trường (chỉ áp dụng khi Công lập trong nước) ──
+        if LOAI_TRUONG_CONG_LAP in lt_low:
+            ok_truong = any(k in truong for k in TRUONG_CONG_LAP_OK)
+            if not ok_truong:
+                reasons.append(
+                    f"Trường '{cm.get('ten_truong')}' không thuộc danh sách "
+                    f"công lập được chấp nhận (NEU, FTU, AOF, BA)"
+                )
+
+        # ── 7. Recheck (nước ngoài) ──
+        if any(k in qg for k in FOREIGN) or any(k in lt_low for k in FOREIGN):
             recheck = True
 
+        # ── 8. Điều kiện Phỏng vấn thẳng ──
+        if "xuất sắc" in xep:
+            xet_phong_van_xep_loai = True
+        if ngay_kt and one_year_ago <= ngay_kt <= today:
+            xet_phong_van_ngay = True
+
+    # Tổng hợp điều kiện phỏng vấn
+    lang_ok = check_language_phong_van(ds_nn)
+    du_phong_van = xet_phong_van_xep_loai and xet_phong_van_ngay and lang_ok
+
+    # ── Trả kết quả theo thứ tự ưu tiên ──
     if reasons:
         return "deny", reasons
     if recheck:
-        return "cho_duyet", []   # recheck → chờ duyệt thủ công
+        return "cho_duyet", []        # Trường nước ngoài → admin xét thủ công
+    if du_phong_van:
+        return "phong_van", []        # Đủ 3 điều kiện → phỏng vấn thẳng
     return "approve", []
 
 
@@ -212,6 +304,7 @@ SLABEL = {
     "approve":   "✅ Đủ điều kiện",
     "deny":      "❌ Từ chối",
     "cho_duyet": "⏳ Chờ duyệt",
+    "phong_van": "🎯 Phỏng vấn thẳng",
 }
 
 
@@ -225,7 +318,7 @@ def get_enriched():
     for c in rows:
         ds_cm = load_cm(c["id"])
         ds_nn = load_nn(c["id"])
-        comp, reasons = compute_status(c, ds_cm)
+        comp, reasons = compute_status(c, ds_cm, ds_nn)
         out.append({
             **c,
             "computed_status": comp,       # trạng thái tính từ rule
@@ -344,8 +437,16 @@ def detail_dialog(rec):
     else:
         st.info("Chưa có dữ liệu ngoại ngữ.")
 
-    # ── Lý do deny/recheck ──
-    if comp_status == "deny" and rec.get("deny_reasons"):
+    # ── Lý do deny/recheck/phong_van ──
+    if comp_status == "phong_van":
+        st.divider()
+        st.success(
+            "🎯 **Ứng viên đủ điều kiện Phỏng vấn thẳng** — đáp ứng cả 3 tiêu chí:\n\n"
+            "- 🏅 Tốt nghiệp loại **Xuất sắc**\n"
+            "- 🌐 Ngoại ngữ vượt ngưỡng (IELTS > 7.0 / TOEIC > 785 / TOEFL > 550)\n"
+            "- 📅 Tốt nghiệp trong **vòng 1 năm** tính tới hiện tại"
+        )
+    elif comp_status == "deny" and rec.get("deny_reasons"):
         st.divider()
         st.markdown("##### ⚠️ Lý do hệ thống đề xuất Từ chối")
         for r in rec["deny_reasons"]:
@@ -359,8 +460,9 @@ def detail_dialog(rec):
     # ── Cập nhật trạng thái ──
     st.markdown("##### ⚙️ Cập nhật trạng thái duyệt")
 
-    opt_keys = ["approve", "deny", "cho_duyet"]
+    opt_keys = ["phong_van", "approve", "deny", "cho_duyet"]
     opt_lbl  = {
+        "phong_van": "🎯 Phỏng vấn thẳng",
         "approve":   "✅ Đủ điều kiện",
         "deny":      "❌ Từ chối",
         "cho_duyet": "⏳ Chờ duyệt",
@@ -456,25 +558,16 @@ st.markdown("""
 enriched = get_enriched()
 total = len(enriched)
 
-# Hiển thị thông báo thành công sau khi bấm "Duyệt danh sách ứng viên" ở lượt
-# trước (đã lưu vào session_state TRƯỚC khi rerun vì st.success() gọi ngay
-# trước st.rerun() sẽ bị mất). Hiển thị 1 lần rồi xóa, tránh lặp lại mỗi rerun.
-if "bulk_success" in st.session_state:
-    _bs = st.session_state.pop("bulk_success")
-    st.success(
-        f"✅ Đã áp dụng trạng thái cho {_bs['total']} hồ sơ — "
-        f"{_bs['approve']} duyệt, {_bs['deny']} từ chối."
-    )
-
 # Đếm theo trang_thai (DB) — phản ánh quyết định thực tế của admin
 n_ap = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) == "approve")
 n_dn = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) == "deny")
 n_cd = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) in ("cho_duyet", "recheck"))
+n_pv = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) == "phong_van")
 
 st.markdown(f"""
 <div class="vcb-ph">
     <div>
-        <div class="vcb-pt">[Sở giao dịch] Danh sách ứng viên tuyển dụng: Chuyên viên khách hàng</div>
+        <div class="vcb-pt">[Sở giao dịch] Danh sách ứng viên tuyển dụng</div>
         <div class="vcb-meta">Tổng: <b>{total}</b> hồ sơ &nbsp;|&nbsp;
             Cập nhật: {datetime.now().strftime('%d/%m/%Y %H:%M')}</div>
     </div>
@@ -484,6 +577,10 @@ st.markdown(f"""
 
 st.markdown(f"""
 <div class="stat-row">
+    <div class="stat-b s-pv" style="border-color:#e8ecef;background:#fafafa;">
+        <span class="stat-n" style="color:#6a1b9a;">{n_pv}</span>
+        <span class="stat-l">🎯 Phỏng vấn thẳng</span>
+    </div>
     <div class="stat-b s-ap"><span class="stat-n">{n_ap}</span><span class="stat-l">✅ Đủ điều kiện</span></div>
     <div class="stat-b s-dn"><span class="stat-n">{n_dn}</span><span class="stat-l">❌ Từ chối</span></div>
     <div class="stat-b s-rc"><span class="stat-n">{n_cd}</span><span class="stat-l">⏳ Chờ duyệt</span></div>
@@ -493,7 +590,28 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+# ── Hiển thị thông báo duyệt thành công (nếu vừa bấm nút) ──
+if "bulk_success" in st.session_state:
+    info = st.session_state.pop("bulk_success")
+    st.markdown(f"""
+    <div style='background:#e8f5e9;border:1.5px solid #66bb6a;border-radius:10px;
+         padding:16px 22px;margin-bottom:12px;display:flex;align-items:center;gap:20px;'>
+        <div style='font-size:28px;'>🎉</div>
+        <div>
+            <div style='font-size:15px;font-weight:800;color:#1b5e20;margin-bottom:6px;'>
+                Danh sách hồ sơ ứng viên đã được duyệt thành công!
+            </div>
+            <div style='font-size:13px;color:#2e7d32;display:flex;gap:24px;flex-wrap:wrap;'>
+                <span>🎯 <b>{info.get('phong_van',0)}</b> phỏng vấn thẳng</span>
+                <span>✅ <b>{info['approve']}</b> ứng viên đủ điều kiện</span>
+                <span>❌ <b>{info['deny']}</b> ứng viên bị từ chối</span>
+                <span>📋 Tổng: <b>{info['total']}</b> hồ sơ đã xử lý</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ── Bộ lọc ──
 cf1, cf2, cf3 = st.columns([3, 2, 2])
@@ -501,14 +619,19 @@ with cf1:
     q_name = st.text_input("Tên", placeholder="🔍 Nhập họ tên...", label_visibility="collapsed")
 with cf2:
     q_st = st.selectbox("Trạng thái",
-        ["Tất cả", "✅ Đủ điều kiện", "❌ Từ chối", "⏳ Chờ duyệt"],
+        ["Tất cả", "🎯 Phỏng vấn thẳng", "✅ Đủ điều kiện", "❌ Từ chối", "⏳ Chờ duyệt"],
         label_visibility="collapsed")
 with cf3:
     q_td = st.selectbox("Trình độ",
         ["Tất cả trình độ", "Đại học", "Thạc sĩ", "Tiến sĩ", "Cao đẳng"],
         label_visibility="collapsed")
 
-ST_MAP = {"✅ Đủ điều kiện": "approve", "❌ Từ chối": "deny", "⏳ Chờ duyệt": "cho_duyet"}
+ST_MAP = {
+    "🎯 Phỏng vấn thẳng": "phong_van",
+    "✅ Đủ điều kiện":     "approve",
+    "❌ Từ chối":          "deny",
+    "⏳ Chờ duyệt":        "cho_duyet",
+}
 
 filtered = enriched
 if q_name.strip():
@@ -616,44 +739,50 @@ else:
     st.markdown("---")
     b1, b2 = st.columns([3, 1])
 
-    # Tính số lượng theo trang_thai HIỆU LỰC (DB nếu có, không thì dùng rule tự động)
-    # Đây là số liệu thật sẽ áp dụng khi bấm nút — KHÔNG dùng thuần computed_status,
-    # vì hồ sơ đã được admin ghi đè thủ công (lưu trạng thái riêng) phải tính theo
-    # giá trị đã lưu, không phải tính lại từ đầu.
+    # Tính số lượng theo trang_thai DB thực tế
     fa = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) == "approve")
     fd = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) == "deny")
     fc = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) in ("cho_duyet", "recheck"))
+    fpv = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) == "phong_van")
 
     with b1:
-        st.markdown(
-            f"<div style='font-size:12.5px;color:#555;padding:6px 0;'>"
-            f"Sẽ áp dụng trạng thái tự động cho <b>{len(filtered)}</b> hồ sơ đang hiển thị — "
-            f"✅ <b style='color:#2e7d32;'>{fa}</b> duyệt &nbsp;"
-            f"❌ <b style='color:#c62828;'>{fd}</b> từ chối &nbsp;"
-            f"⏳ <b style='color:#1565c0;'>{fc}</b> chờ duyệt"
-            f"</div>",
-            unsafe_allow_html=True
-        )
+        if fc > 0:
+            st.markdown(
+                f"<div style='font-size:12.5px;color:#b71c1c;padding:8px 0;'>"
+                f"⚠️ Không thể duyệt — còn <b>{fc}</b> ứng viên đang <b>⏳ Chờ duyệt</b>. "
+                f"Vui lòng xem xét và cập nhật trạng thái cho tất cả trước khi duyệt danh sách."
+                f"</div>",
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f"<div style='font-size:12.5px;color:#555;padding:8px 0;'>"
+                f"Sẵn sàng duyệt <b>{len(filtered)}</b> hồ sơ — "
+                f"🎯 <b style='color:#6a1b9a;'>{fpv}</b> phỏng vấn &nbsp;"
+                f"✅ <b style='color:#2e7d32;'>{fa}</b> đủ điều kiện &nbsp;"
+                f"❌ <b style='color:#c62828;'>{fd}</b> từ chối"
+                f"</div>",
+                unsafe_allow_html=True)
+
     with b2:
-        # Khóa nút nếu còn hồ sơ chờ duyệt — admin phải xử lý hết "chờ duyệt"
-        # (qua dialog chi tiết / lưu trạng thái thủ công) trước khi được áp dụng
-        # trạng thái tự động cho cả danh sách.
-        if st.button("✅ Duyệt danh sách ứng viên",
-                     use_container_width=True, key="bulk",
-                     disabled=(fc > 0)):
+        btn_clicked = st.button(
+            "✅ Duyệt danh sách ứng viên",
+            use_container_width=True,
+            key="bulk",
+            disabled=(fc > 0),   # khoá nút nếu còn chờ duyệt
+        )
+
+    if btn_clicked:
+        if fc > 0:
+            st.error(f"⚠️ Vẫn còn {fc} ứng viên chưa được xét duyệt. Không thể duyệt danh sách!")
+        else:
             bulk_save(filtered)
             st.cache_data.clear()
             # Lưu thông báo vào session_state TRƯỚC khi rerun
             # (st.success() gọi trước st.rerun() sẽ biến mất ngay)
             st.session_state["bulk_success"] = {
-                "approve": fa,
-                "deny":    fd,
-                "total":   fa + fd,
+                "phong_van": fpv,
+                "approve":   fa,
+                "deny":      fd,
+                "total":     fpv + fa + fd,
             }
             st.rerun()
-        if fc > 0:
-            st.markdown(
-                f"<div style='font-size:11px;color:#e65100;padding:4px 2px 0;'>"
-                f"⏳ Còn <b>{fc}</b> hồ sơ chờ duyệt — xử lý hết để mở khóa nút này</div>",
-                unsafe_allow_html=True
-            )
