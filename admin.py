@@ -567,7 +567,7 @@ n_pv = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) 
 st.markdown(f"""
 <div class="vcb-ph">
     <div>
-        <div class="vcb-pt">[Sở giao dịch] Danh sách ứng viên tuyển dụng</div>
+        <div class="vcb-pt">[Sở giao dịch] Danh sách ứng viên: Chuyên viên khách hàng</div>
         <div class="vcb-meta">Tổng: <b>{total}</b> hồ sơ &nbsp;|&nbsp;
             Cập nhật: {datetime.now().strftime('%d/%m/%Y %H:%M')}</div>
     </div>
