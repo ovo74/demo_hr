@@ -456,6 +456,16 @@ st.markdown("""
 enriched = get_enriched()
 total = len(enriched)
 
+# Hiển thị thông báo thành công sau khi bấm "Duyệt danh sách ứng viên" ở lượt
+# trước (đã lưu vào session_state TRƯỚC khi rerun vì st.success() gọi ngay
+# trước st.rerun() sẽ bị mất). Hiển thị 1 lần rồi xóa, tránh lặp lại mỗi rerun.
+if "bulk_success" in st.session_state:
+    _bs = st.session_state.pop("bulk_success")
+    st.success(
+        f"✅ Đã áp dụng trạng thái cho {_bs['total']} hồ sơ — "
+        f"{_bs['approve']} duyệt, {_bs['deny']} từ chối."
+    )
+
 # Đếm theo trang_thai (DB) — phản ánh quyết định thực tế của admin
 n_ap = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) == "approve")
 n_dn = sum(1 for r in enriched if (r.get("trang_thai") or r["computed_status"]) == "deny")
@@ -606,27 +616,31 @@ else:
     st.markdown("---")
     b1, b2 = st.columns([3, 1])
 
-    # Tính số lượng theo trang_thai DB thực tế
+    # Tính số lượng theo trang_thai HIỆU LỰC (DB nếu có, không thì dùng rule tự động)
+    # Đây là số liệu thật sẽ áp dụng khi bấm nút — KHÔNG dùng thuần computed_status,
+    # vì hồ sơ đã được admin ghi đè thủ công (lưu trạng thái riêng) phải tính theo
+    # giá trị đã lưu, không phải tính lại từ đầu.
     fa = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) == "approve")
     fd = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) == "deny")
     fc = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) in ("cho_duyet", "recheck"))
 
     with b1:
-        fa = sum(1 for r in filtered if r["computed_status"] == "approve")
-        fd = sum(1 for r in filtered if r["computed_status"] == "deny")
-        fr = sum(1 for r in filtered if r["computed_status"] == "recheck")
         st.markdown(
             f"<div style='font-size:12.5px;color:#555;padding:6px 0;'>"
             f"Sẽ áp dụng trạng thái tự động cho <b>{len(filtered)}</b> hồ sơ đang hiển thị — "
             f"✅ <b style='color:#2e7d32;'>{fa}</b> duyệt &nbsp;"
             f"❌ <b style='color:#c62828;'>{fd}</b> từ chối &nbsp;"
-            f"🔍 <b style='color:#e65100;'>{fr}</b> xem xét"
+            f"⏳ <b style='color:#1565c0;'>{fc}</b> chờ duyệt"
             f"</div>",
             unsafe_allow_html=True
         )
     with b2:
+        # Khóa nút nếu còn hồ sơ chờ duyệt — admin phải xử lý hết "chờ duyệt"
+        # (qua dialog chi tiết / lưu trạng thái thủ công) trước khi được áp dụng
+        # trạng thái tự động cho cả danh sách.
         if st.button("✅ Duyệt danh sách ứng viên",
-                     use_container_width=True, key="bulk"):
+                     use_container_width=True, key="bulk",
+                     disabled=(fc > 0)):
             bulk_save(filtered)
             st.cache_data.clear()
             # Lưu thông báo vào session_state TRƯỚC khi rerun
@@ -637,3 +651,9 @@ else:
                 "total":   fa + fd,
             }
             st.rerun()
+        if fc > 0:
+            st.markdown(
+                f"<div style='font-size:11px;color:#e65100;padding:4px 2px 0;'>"
+                f"⏳ Còn <b>{fc}</b> hồ sơ chờ duyệt — xử lý hết để mở khóa nút này</div>",
+                unsafe_allow_html=True
+            )
