@@ -93,6 +93,27 @@ st.markdown("""
     div[data-testid="stFileUploader"] section span,
     div[data-testid="stFileUploader"] section small { color: #ffffff !important; fill: #ffffff !important; }
 
+    /* Nút "Upload": LUÔN hiện rõ (nền trắng, chữ/icon màu đậm), không phụ
+       thuộc hover, để nổi bật trên nền xanh của vùng kéo-thả phía trên.
+       Dùng nhiều selector dự phòng vì tên data-testid của nút có thể
+       khác nhau giữa các bản Streamlit. */
+    div[data-testid="stFileUploader"] section button,
+    div[data-testid="stFileUploaderDropzone"] button,
+    div[data-testid="stFileUploader"] section [data-testid*="BaseButton"],
+    div[data-testid="stFileUploader"] section [data-testid$="-secondary"] {
+        background-color: #ffffff !important;
+        border: 1px solid #CFD8DC !important;
+        border-radius: 4px !important;
+        opacity: 1 !important;
+    }
+    div[data-testid="stFileUploader"] section button *,
+    div[data-testid="stFileUploaderDropzone"] button *,
+    div[data-testid="stFileUploader"] section [data-testid*="BaseButton"] *,
+    div[data-testid="stFileUploader"] section [data-testid$="-secondary"] * {
+        color: #29B6F6 !important;
+        fill: #29B6F6 !important;
+    }
+
     .stTextArea textarea {
         background-color: #ffffff !important;
         color: #111111 !important;
