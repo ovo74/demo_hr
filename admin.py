@@ -123,10 +123,6 @@ def save_status(hid, status):
     conn.close()
 
 def bulk_save(records):
-    """Lưu trạng thái cuối cùng vào DB.
-    Ưu tiên trang_thai do admin đã set thủ công;
-    chỉ dùng computed_status khi trang_thai chưa được ghi (None/rỗng).
-    """
     conn = get_conn()
     for r in records:
         # Nếu admin đã ghi đè thủ công → giữ nguyên quyết định đó
@@ -487,27 +483,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-# ── Hiển thị thông báo duyệt thành công (nếu vừa bấm nút) ──
-if "bulk_success" in st.session_state:
-    info = st.session_state.pop("bulk_success")
-    st.markdown(f"""
-    <div style='background:#e8f5e9;border:1.5px solid #66bb6a;border-radius:10px;
-         padding:16px 22px;margin-bottom:12px;display:flex;align-items:center;gap:20px;'>
-        <div style='font-size:28px;'>🎉</div>
-        <div>
-            <div style='font-size:15px;font-weight:800;color:#1b5e20;margin-bottom:6px;'>
-                Danh sách hồ sơ ứng viên đã được duyệt thành công!
-            </div>
-            <div style='font-size:13px;color:#2e7d32;display:flex;gap:24px;'>
-                <span>✅ <b>{info['approve']}</b> ứng viên đủ điều kiện</span>
-                <span>❌ <b>{info['deny']}</b> ứng viên bị từ chối</span>
-                <span>📋 Tổng: <b>{info['total']}</b> hồ sơ đã xử lý</span>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 # ── Bộ lọc ──
 cf1, cf2, cf3 = st.columns([3, 2, 2])
@@ -636,34 +612,21 @@ else:
     fc = sum(1 for r in filtered if (r.get("trang_thai") or r["computed_status"]) in ("cho_duyet", "recheck"))
 
     with b1:
-        if fc > 0:
-            st.markdown(
-                f"<div style='font-size:12.5px;color:#b71c1c;padding:8px 0;'>"
-                f"⚠️ Không thể duyệt — còn <b>{fc}</b> ứng viên đang <b>⏳ Chờ duyệt</b>. "
-                f"Vui lòng xem xét và cập nhật trạng thái cho tất cả trước khi duyệt danh sách."
-                f"</div>",
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                f"<div style='font-size:12.5px;color:#555;padding:8px 0;'>"
-                f"Sẵn sàng duyệt <b>{len(filtered)}</b> hồ sơ — "
-                f"✅ <b style='color:#2e7d32;'>{fa}</b> đủ điều kiện &nbsp;"
-                f"❌ <b style='color:#c62828;'>{fd}</b> từ chối"
-                f"</div>",
-                unsafe_allow_html=True)
-
-    with b2:
-        btn_clicked = st.button(
-            "✅ Duyệt danh sách ứng viên",
-            use_container_width=True,
-            key="bulk",
-            disabled=(fc > 0),   # khoá nút nếu còn chờ duyệt
+        fa = sum(1 for r in filtered if r["computed_status"] == "approve")
+        fd = sum(1 for r in filtered if r["computed_status"] == "deny")
+        fr = sum(1 for r in filtered if r["computed_status"] == "recheck")
+        st.markdown(
+            f"<div style='font-size:12.5px;color:#555;padding:6px 0;'>"
+            f"Sẽ áp dụng trạng thái tự động cho <b>{len(filtered)}</b> hồ sơ đang hiển thị — "
+            f"✅ <b style='color:#2e7d32;'>{fa}</b> duyệt &nbsp;"
+            f"❌ <b style='color:#c62828;'>{fd}</b> từ chối &nbsp;"
+            f"🔍 <b style='color:#e65100;'>{fr}</b> xem xét"
+            f"</div>",
+            unsafe_allow_html=True
         )
-
-    if btn_clicked:
-        if fc > 0:
-            st.error(f"⚠️ Vẫn còn {fc} ứng viên chưa được xét duyệt. Không thể duyệt danh sách!")
-        else:
+    with b2:
+        if st.button("✅ Duyệt danh sách ứng viên",
+                     use_container_width=True, key="bulk"):
             bulk_save(filtered)
             st.cache_data.clear()
             # Lưu thông báo vào session_state TRƯỚC khi rerun
