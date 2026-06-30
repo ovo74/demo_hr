@@ -148,7 +148,6 @@ FOREIGN = ["nước ngoài", "quốc tế", "international", "foreign"]
 # Vị trí: Chuyên viên khách hàng
 # Nhóm chuyên ngành được chấp nhận
 NHOM_CHAP_NHAN = ["kinh tế - quản lý", "kinh te - quan ly"]
-CHUYEN_NGANH_LUAT_CHAP_NHAN = ["luật kinh tế", "luat kinh te"]
 
 # Với trường công lập trong nước: chỉ chấp nhận 4 trường
 TRUONG_CONG_LAP_OK = [
@@ -258,21 +257,23 @@ def compute_status(c, ds_cm, ds_nn=None):
             reasons.append(f"Loại hình '{lh}' không phải Chính quy")
 
         # ── 5. Nhóm chuyên ngành (YC vị trí Chuyên viên KH) ──
+        # Chỉ chấp nhận khối Kinh tế - Quản lý; không còn ngoại lệ Luật kinh tế
         ok_nhom = any(k in nhom for k in NHOM_CHAP_NHAN)
-        ok_luat = ("luật" in nhom) and any(k in cn for k in CHUYEN_NGANH_LUAT_CHAP_NHAN)
-        if nhom and not ok_nhom and not ok_luat:
+        if nhom and not ok_nhom:
             reasons.append(
                 f"Nhóm chuyên ngành '{cm.get('nhom_chuyen_nganh')}' "
-                f"không phù hợp vị trí Chuyên viên Khách hàng"
+                f"không phù hợp vị trí Chuyên viên Khách hàng "
+                f"(chỉ chấp nhận khối Kinh tế - Quản lý)"
             )
 
-        # ── 6. Tên trường (chỉ áp dụng khi Công lập trong nước) ──
-        if LOAI_TRUONG_CONG_LAP in lt_low:
+        # ── 6. Tên trường (áp dụng mọi trường trong nước; nước ngoài → recheck) ──
+        is_foreign_cm = any(k in qg for k in FOREIGN) or any(k in lt_low for k in FOREIGN)
+        if truong and not is_foreign_cm:
             ok_truong = any(k in truong for k in TRUONG_CONG_LAP_OK)
             if not ok_truong:
                 reasons.append(
                     f"Trường '{cm.get('ten_truong')}' không thuộc danh sách "
-                    f"công lập được chấp nhận (NEU, FTU, AOF, BA)"
+                    f"được chấp nhận (NEU, FTU, AOF, BA)"
                 )
 
         # ── 7. Recheck (nước ngoài) ──
