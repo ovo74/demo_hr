@@ -1,6 +1,8 @@
 import sqlite3
 import hashlib
 import os
+import unicodedata
+import re
 from datetime import datetime, date
 
 
@@ -129,6 +131,9 @@ FOREIGN = ["nước ngoài", "quốc tế", "international", "foreign"]
 
 NHOM_CHAP_NHAN = ["kinh tế - quản lý", "kinh te - quan ly"]
 
+# Chuyên ngành CỤ THỂ bị loại dù nằm trong nhóm Kinh tế - Quản lý
+CHUYEN_NGANH_LOAI_TRU = ["hải quan", "hai quan"]
+
 TRUONG_CONG_LAP_OK = [
     "kinh tế quốc dân", "neu",
     "ngoại thương", "ftu",
@@ -170,11 +175,89 @@ def _check_language_phong_van(ds_nn: list) -> bool:
     return False
 
 
+def _khong_dau(s: str) -> str:
+    """Bỏ dấu tiếng Việt + hạ chữ thường, dùng để so khớp mờ (OCR thường mất dấu)."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d").replace("Đ", "D")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+# Các nhóm tên trường tương đương (tiếng Việt / tiếng Anh / viết tắt) — để đối
+# chiếu OCR không báo nhầm "lệch thông tin" khi văn bằng ghi tên tiếng Anh
+# nhưng ứng viên khai tên tiếng Việt của CHÍNH trường đó (hoặc ngược lại).
+_TRUONG_DONG_NGHIA = [
+    ["học viện ngân hàng", "banking academy"],
+    ["đại học kinh tế quốc dân", "national economics university", "neu"],
+    ["đại học ngoại thương", "foreign trade university", "ftu"],
+    ["học viện tài chính", "academy of finance", "aof"],
+    ["đại học bách khoa hà nội", "hanoi university of science and technology"],
+    ["đại học troy", "troy university"],
+    ["đại học rmit", "rmit university"],
+]
+
+
+def _cung_truong(ten_a: str, ten_b: str) -> bool:
+    """True nếu 2 tên trường được coi là cùng 1 trường (khớp trực tiếp hoặc cùng nhóm đồng nghĩa)."""
+    na, nb = _khong_dau(ten_a), _khong_dau(ten_b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    for nhom in _TRUONG_DONG_NGHIA:
+        nhom_kd = [_khong_dau(k) for k in nhom]
+        if any(k in na for k in nhom_kd) and any(k in nb for k in nhom_kd):
+            return True
+    return False
+
+
+def doi_chieu_ocr(thong_tin, ds_chuyen_mon):
+    """
+    So khớp dữ liệu OCR trích xuất từ văn bằng (thong_tin['ocr_truong'],
+    thong_tin['ocr_chuyen_nganh']) với thông tin ứng viên TỰ KHAI.
+    OCR chỉ đóng vai trò THAM KHẢO/ĐỐI CHIẾU — không tự ý approve/deny.
+    Trả về list câu cảnh báo lệch thông tin (rỗng nếu khớp hoặc không có OCR).
+    Bản sao 1:1 hàm cùng tên trong admin.py.
+    """
+    ocr_truong = (thong_tin.get("ocr_truong") or "").strip()
+    ocr_nganh  = (thong_tin.get("ocr_chuyen_nganh") or "").strip()
+
+    if not ocr_truong and not ocr_nganh:
+        return []
+
+    canh_bao = []
+    truong_khop = any(
+        _cung_truong(ocr_truong, cm.get("ten_truong")) for cm in ds_chuyen_mon
+    ) if ocr_truong else True
+
+    nganh_khop = any(
+        _khong_dau(ocr_nganh) in _khong_dau(cm.get("chuyen_nganh"))
+        or _khong_dau(cm.get("chuyen_nganh") or "") in _khong_dau(ocr_nganh)
+        for cm in ds_chuyen_mon
+    ) if ocr_nganh else True
+
+    if ocr_truong and not truong_khop:
+        canh_bao.append(
+            f"Tên trường tự khai không khớp với văn bằng đã quét (OCR đọc được: \"{ocr_truong}\")"
+        )
+    if ocr_nganh and not nganh_khop:
+        canh_bao.append(
+            f"Chuyên ngành tự khai không khớp với văn bằng đã quét (OCR đọc được: \"{ocr_nganh}\")"
+        )
+    return canh_bao
+
+
 def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = None):
     """
     Trả về trang_thai tự động: "deny" | "cho_duyet" | "phong_van" | "approve".
-    Thứ tự ưu tiên: deny → cho_duyet (nước ngoài, cần admin xét tay) →
-    phong_van (đủ 3 điều kiện) → approve.
+    Thứ tự ưu tiên: deny → cho_duyet (nước ngoài / điểm không rõ thang / OCR lệch,
+    cần admin xét tay) → phong_van (đủ 3 điều kiện) → approve.
+
+    Lưu ý về OCR: dữ liệu OCR quét văn bằng KHÔNG được dùng làm căn cứ tự động
+    approve/deny — chỉ dùng để đối chiếu chéo với thông tin ứng viên tự khai.
+    Nếu lệch, hồ sơ được đẩy về "cho_duyet" thay vì tự động approve.
 
     Đây là bản sao 1:1 hàm compute_status trong admin.py, chỉ đổi tên
     tham số cho khớp với cách gọi từ luu_ho_so().
@@ -193,6 +276,7 @@ def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = No
         reasons.append("Không xác định ngày sinh")
 
     recheck = False
+    diem_khong_xac_dinh = False   # điểm có giá trị nhưng không rõ theo thang nào -> cho_duyet
     xet_phong_van_xep_loai = False
     xet_phong_van_ngay = False
 
@@ -215,8 +299,11 @@ def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = No
             reasons.append("Trình độ Cao đẳng không hợp lệ")
 
         # ── Điểm tổng kết ──
+        # Nếu có điểm nhưng KHÔNG xác định được đang theo thang nào (không phải
+        # dạng "x/y", và thang_diem không chứa "/10" hay "/4") thì KHÔNG được
+        # coi là mặc nhiên đạt — phải đẩy vào diện chờ duyệt để admin xét tay.
         try:
-            if "/" in diem:
+            if diem and "/" in diem:
                 p = diem.split("/")
                 dv = float(p[0].replace(",", "."))
                 sc = float(p[1].replace(",", "."))
@@ -224,14 +311,17 @@ def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = No
                     reasons.append(f"Điểm {dv}/{sc} < 6.5")
                 elif 3 <= sc < 9 and dv < 2.5:
                     reasons.append(f"Điểm {dv}/{sc} < 2.5")
-            else:
+            elif diem:
                 dv = float(diem.replace(",", "."))
                 if "/10" in thang and dv < 6.5:
                     reasons.append(f"Điểm {dv}/10 < 6.5")
                 elif "/4" in thang and dv < 2.5:
                     reasons.append(f"Điểm {dv}/4 < 2.5")
+                elif "/10" not in thang and "/4" not in thang:
+                    diem_khong_xac_dinh = True
         except Exception:
-            pass
+            if diem:
+                diem_khong_xac_dinh = True
 
         # ── Loại hình đào tạo ──
         if lh and "chính quy" not in lh.lower():
@@ -245,6 +335,13 @@ def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = No
                 f"Nhóm chuyên ngành '{cm.get('nhom_chuyen_nganh')}' "
                 f"không phù hợp vị trí Chuyên viên Khách hàng "
                 f"(chỉ chấp nhận khối Kinh tế - Quản lý)"
+            )
+
+        # ── Chuyên ngành cụ thể bị loại trừ (dù nhóm là Kinh tế - Quản lý) ──
+        if cn and any(k in cn for k in CHUYEN_NGANH_LOAI_TRU):
+            reasons.append(
+                f"Chuyên ngành '{cm.get('chuyen_nganh')}' không thuộc diện "
+                f"đủ điều kiện thi tuyển (Hải quan và nghiệp vụ ngoại thương bị loại trừ)"
             )
 
         # ── Tên trường (áp dụng mọi trường trong nước; nước ngoài → recheck) ──
@@ -274,6 +371,13 @@ def compute_status(thong_tin: dict, ds_chuyen_mon: list, ds_ngoai_ngu: list = No
         return "deny"
     if recheck:
         return "cho_duyet"
+    if diem_khong_xac_dinh:
+        return "cho_duyet"
+
+    # ── OCR đối chiếu (chỉ tham khảo, KHÔNG tự ý approve/deny) ──
+    if doi_chieu_ocr(thong_tin, ds_chuyen_mon):
+        return "cho_duyet"
+
     if du_phong_van:
         return "phong_van"
     return "approve"

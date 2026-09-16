@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 import fitz  # PyMuPDF để xử lý PDF ảnh scan
 import easyocr
+import cv2
+import numpy as np
+import re
+import unicodedata
 import smtplib
 import base64
 import io
@@ -124,11 +128,259 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────
+# QUY TẮC TUYỂN DỤNG (bảng gợi ý trường/ngành — chỉ dùng để hỗ trợ khớp lựa chọn
+# trên form, KHÔNG dùng để tự động approve/deny hồ sơ)
+# ─────────────────────────────────────────────────────────────────────
+def get_recruitment_rules():
+    try:
+        return pd.read_excel("rules.xlsx")
+    except Exception:
+        return pd.DataFrame({
+            "Truong_Dai_Hoc": ["Ngoại thương", "FTU", "Kinh tế Quốc dân", "NEU", "Học viện Ngân hàng"],
+            "Chuyen_Nganh":   ["Kinh tế đối ngoại", "Tài chính", "Ngân hàng", "Kế toán", "Tài chính Ngân hàng"]
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TIỆN ÍCH SO KHỚP MỜ (OCR tiếng Việt thường mất dấu / lệch khoảng trắng)
+# ─────────────────────────────────────────────────────────────────────
+def _khong_dau(s: str) -> str:
+    """Bỏ dấu + hạ chữ thường + coi dấu gạch ngang/gạch chéo như khoảng trắng
+    (VD: "TÀI CHÍNH-NGÂN HÀNG" -> "tai chinh ngan hang", khớp được với từ điển
+    "Tài chính Ngân hàng" dù văn bằng viết liền dấu gạch ngang, không cách)."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d").replace("Đ", "D")
+    s = re.sub(r"[\-–—/]", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TIỀN XỬ LÝ ẢNH TRƯỚC KHI OCR — tăng độ chính xác cho văn bằng scan
+# (độ phân giải cao hơn + khử nhiễu + tăng tương phản nhị phân hoá thích ứng)
+# ─────────────────────────────────────────────────────────────────────
+def _preprocess_page_for_ocr(pix):
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+    elif pix.n == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img[:, :, 0] if img.ndim == 3 else img
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    gray = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+    )
+    return gray
+
+
+# ─────────────────────────────────────────────────────────────────────
 # CACHE ENGINE OCR
 # ─────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_ocr_engine():
     return easyocr.Reader(['vi', 'en'], gpu=False)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# QUÉT OCR VĂN BẰNG — trả về (raw_text, extracted_fields_dict)
+# ─────────────────────────────────────────────────────────────────────
+def run_ocr_on_pdf(file_bytes):
+    """Quét toàn bộ PDF (mỗi trang scale 3x + tiền xử lý ảnh) và ghép text."""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    reader = load_ocr_engine()
+    extracted_text = ""
+
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        # Scale 3x thay vì 2x để giữ được chi tiết chữ nhỏ trên văn bằng scan
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+        processed = _preprocess_page_for_ocr(pix)
+        results = reader.readtext(processed, detail=0, paragraph=False)
+        extracted_text += " ".join(results) + "\n"
+
+    return extracted_text
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TRÍCH XUẤT TRƯỜNG THÔNG TIN TỪ VĂN BẰNG (v2)
+#
+# Bài học rút ra khi test với văn bằng scan thật: OCR tiếng Việt có dấu rất
+# hay bị garble (mất dấu, lẫn ký tự, nuốt mất nhãn "Ngành:"/"Trường:"...).
+# Vì vậy chiến lược 2 lớp được áp dụng:
+#   1) Regex theo nhãn (label-based) cho các trường có định dạng khá ổn định
+#      (ngày sinh, xếp loại, loại hình, văn bằng, họ tên có tiền tố Bà/Ông).
+#   2) So khớp theo TỪ ĐIỂN (dictionary match) cho Trường/Chuyên ngành — vì
+#      nhãn "Trường:"/"Ngành:" trên văn bằng thật RẤT hay bị OCR nuốt mất,
+#      nhưng tên trường/tên ngành thực tế (dù viết hoa/thường lẫn lộn) vẫn
+#      còn nằm đâu đó trong văn bản → so khớp mờ (bỏ dấu) với danh sách
+#      trường/ngành phổ biến đáng tin cậy hơn nhiều so với bắt theo nhãn.
+# Toàn bộ kết quả CHỈ dùng để gợi ý điền sẵn — ứng viên luôn xem lại & sửa.
+# ─────────────────────────────────────────────────────────────────────
+_NGAY_SINH_PATTERNS = [
+    # "Ngày, tháng, năm sinh: dd/mm/yyyy" — kể cả khi OCR đọc nhầm "năm" -> "hăm"/"nam"
+    r"(?:ngày,?\s*tháng,?\s*)?(?:năm|nam|hăm)\s*sinh\s*[:\-]?\s*(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
+    r"(?:sinh\s*ngày|ngày\s*sinh)\s*[:\-]?\s*(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
+    r"sinh\s*ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})",
+]
+
+_HOTEN_PATTERNS = [
+    r"họ\s*(?:và|,)?\s*tên(?:\s*(?:là|sinh\s*viên|học\s*viên))?\s*[:\-]?\s*"
+    r"([^\n\d,;]{3,60}?)(?=\s+sinh\s*ngày|\s+ngày\s*sinh|\s+nam\s*sinh|[\n,;]|$)",
+    # Nhiều bản sao y/chứng thực văn bằng VN ghi "Bà/Ông <Họ tên>" — khá đáng tin cậy
+    r"(?:Bà|Ông)[ \t]+([A-ZÀ-Ỹ][a-zà-ỹ]+(?:[ \t]+[A-ZÀ-Ỹ][a-zà-ỹ]+){1,4})",
+]
+
+# ── Văn bằng / Xếp loại / Loại hình đào tạo: so khớp trên bản KHÔNG DẤU ──
+# Lý do đổi từ regex-có-dấu sang so khớp không dấu: chữ tiêu đề/in hoa trên
+# văn bằng (VD "BẰNG CỬ NHÂN") rất hay bị OCR đọc ra thành "BANG CU NHAN"
+# (mất dấu hoàn toàn) — regex yêu cầu ký tự có dấu sẽ luôn trượt trong
+# trường hợp này. So khớp không dấu + ánh xạ về nhãn tiếng Việt chuẩn
+# (canonical) vừa chịu lỗi OCR tốt hơn, vừa đảm bảo giá trị điền vào form
+# luôn đúng chính tả có dấu (không phụ thuộc OCR đọc đúng dấu hay không).
+_VAN_BANG_CANON = [("thac si", "Thạc sĩ"), ("tien si", "Tiến sĩ"), ("ky su", "Kỹ sư"), ("cu nhan", "Cử nhân")]
+_LOAI_HINH_CANON = [
+    ("vua hoc vua lam", "Vừa học vừa làm"), ("lien thong", "Liên thông"),
+    ("tai chuc", "Tại chức"), ("tu xa", "Từ xa"), ("chinh quy", "Chính quy"),
+]
+# Nhãn "xếp loại"/"hạng tốt nghiệp" thường bị OCR nuốt dấu ("Xep loai", "Hang tot nghiep")
+# nên cũng so khớp trên bản không dấu; giá trị Giỏi/Khá... nếu OCR đọc sai 1-2 ký tự
+# (VD "Gidi" thay vì "Giỏi") sẽ không khớp được — đây là giới hạn còn lại, ứng viên
+# vẫn cần xem lại field này.
+_XEP_LOAI_LABEL_KD = r"(?:xep\s*loai(?:\s*tot\s*nghiep)?|hang\s*tot\s*nghiep)\s*[:\-]?\s*"
+_XEP_LOAI_CANON = [
+    ("xuat sac", "Xuất sắc"), ("trung binh kha", "Trung bình khá"),
+    ("trung binh", "Trung bình"), ("gioi", "Giỏi"), ("kha", "Khá"), ("yeu", "Yếu"),
+]
+
+
+def _match_canon(text_kd: str, canon_list, window: str = None):
+    """So khớp danh sách (từ_khóa_không_dấu, nhãn_chuẩn) trên bản text không dấu.
+    window: nếu truyền vào, chỉ tìm trong đoạn text đó (dùng khi cần bám theo nhãn)."""
+    hay = window if window is not None else text_kd
+    for kd, canon in canon_list:
+        if kd in hay:
+            return canon
+    return None
+
+
+# Danh mục trường/ngành phổ biến để so khớp mờ (bỏ dấu) — có thể mở rộng thêm.
+# Nguồn: TRUONG_CONG_LAP_OK cộng thêm 1 số trường/ngành hay gặp khác.
+_KNOWN_SCHOOLS = [
+    "Học viện Ngân hàng", "Banking Academy",
+    "Đại học Kinh tế Quốc dân", "National Economics University",
+    "Đại học Ngoại thương", "Foreign Trade University",
+    "Học viện Tài chính", "Academy of Finance",
+    "Đại học Bách khoa Hà Nội", "Hanoi University of Science and Technology",
+    "Đại học Kinh tế TP.HCM", "Đại học Kinh tế - Đại học Quốc gia Hà Nội",
+    "Đại học Troy", "Troy University",
+    "Đại học RMIT", "RMIT University",
+    "Học viện Tài chính", "Đại học Thương mại",
+]
+_KNOWN_MAJORS = [
+    "Hệ thống thông tin quản lý", "Management Information System",
+    "Tài chính Ngân hàng", "Banking and Finance",
+    "Quản trị Kinh doanh", "Business Administration",
+    "Kế toán", "Accounting",
+    "Kinh tế đối ngoại", "Công nghệ thông tin",
+    "Kinh doanh Tổng hợp", "General Business",
+    "Luật kinh tế", "Kinh tế chính trị",
+]
+
+
+def _dict_match(text: str, candidates: list):
+    """So khớp mờ (bỏ dấu) — trả về ứng viên KHỚP DÀI NHẤT tìm thấy trong text (hoặc None)."""
+    best = None
+    for cand in candidates:
+        if _khong_dau(cand) in _khong_dau(text):
+            if best is None or len(cand) > len(best):
+                best = cand
+    return best
+
+
+def extract_diploma_fields(raw_text: str) -> dict:
+    """
+    Trích xuất các trường thông tin có cấu trúc (họ tên, ngày sinh, trường, ngành,
+    xếp loại, loại hình đào tạo, văn bằng...) từ text OCR thô của văn bằng.
+    Đây là bước GỢI Ý ĐIỀN SẴN cho ứng viên — không phải căn cứ xét duyệt.
+    """
+    text = raw_text or ""
+    result = {}
+
+    # Ngày sinh: thử các mẫu nhãn trước, nếu không có thì fallback lấy
+    # bất kỳ dd/mm/yyyy hợp lệ nào có năm sinh nằm trong khoảng hợp lý.
+    for pat in _NGAY_SINH_PATTERNS:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            d, mo, y = m.groups()
+            try:
+                if 1955 <= int(y) <= 2010:
+                    result["ngay_sinh"] = f"{int(d):02d}/{int(mo):02d}/{y}"
+                    break
+            except ValueError:
+                pass
+    if "ngay_sinh" not in result:
+        for m in re.finditer(r"(\d{1,2})\s*[\/\.]\s*(\d{1,2})\s*[\/\.]\s*(\d{4})", text):
+            d, mo, y = m.groups()
+            if 1955 <= int(y) <= 2010 and 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+                result["ngay_sinh"] = f"{int(d):02d}/{int(mo):02d}/{y}"
+                break
+
+    for pat in _HOTEN_PATTERNS:
+        m = re.search(pat, text)
+        if m:
+            val = re.sub(r"\s+", " ", m.group(1)).strip(" .,:;-")
+            if val:
+                result["ho_ten"] = val.title()
+                break
+
+    text_kd = _khong_dau(text)  # bản không dấu, dùng chung cho các so khớp bên dưới
+
+    m = re.search(_XEP_LOAI_LABEL_KD + r"(.{0,25})", text_kd)
+    if m:
+        xep_loai = _match_canon(text_kd, _XEP_LOAI_CANON, window=m.group(1))
+        if xep_loai:
+            result["xep_loai"] = xep_loai
+
+    loai_hinh = _match_canon(text_kd, _LOAI_HINH_CANON)
+    if loai_hinh:
+        result["loai_hinh"] = loai_hinh
+
+    van_bang = _match_canon(text_kd, _VAN_BANG_CANON)
+    if van_bang:
+        result["van_bang"] = van_bang
+
+    # Trường / Chuyên ngành: so khớp từ điển thay vì bắt theo nhãn — vì nhãn
+    # "Trường:"/"Ngành:" trên văn bằng thật rất hay bị OCR nuốt mất.
+    truong = _dict_match(text, _KNOWN_SCHOOLS)
+    if truong:
+        result["truong"] = truong
+    nganh = _dict_match(text, _KNOWN_MAJORS)
+    if nganh:
+        result["chuyen_nganh"] = nganh
+
+    # Đối chiếu thêm với rules.xlsx (nếu có) để chuẩn hoá cách viết — tham khảo thêm
+    try:
+        df_rules = get_recruitment_rules()
+        if "truong" not in result:
+            for _, row in df_rules.iterrows():
+                if _khong_dau(str(row["Truong_Dai_Hoc"])) in _khong_dau(text):
+                    result["truong"] = row["Truong_Dai_Hoc"]
+                    break
+    except Exception:
+        pass
+
+    return result
+
+
+def _tach_ho_ten(ho_ten_day_du: str):
+    """Tách 'Họ tên đầy đủ' -> (họ đệm, tên) theo quy ước VN: từ cuối cùng là Tên."""
+    parts = (ho_ten_day_du or "").split()
+    if len(parts) < 2:
+        return "", ho_ten_day_du or ""
+    return " ".join(parts[:-1]), parts[-1]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -150,52 +402,6 @@ def get_base64_image(image_path):
         return base64.b64encode(buffered.getvalue()).decode()
     except Exception:
         return None
-
-
-# ─────────────────────────────────────────────────────────────────────
-# QUY TẮC TUYỂN DỤNG
-# ─────────────────────────────────────────────────────────────────────
-def get_recruitment_rules():
-    try:
-        return pd.read_excel("rules.xlsx")
-    except Exception:
-        return pd.DataFrame({
-            "Truong_Dai_Hoc": ["Ngoại thương", "FTU", "Kinh tế Quốc dân", "NEU", "Học viện Ngân hàng"],
-            "Chuyen_Nganh":   ["Kinh tế đối ngoại", "Tài chính", "Ngân hàng", "Kế toán", "Tài chính Ngân hàng"]
-        })
-
-
-# ─────────────────────────────────────────────────────────────────────
-# QUÉT OCR VĂN BẰNG
-# ─────────────────────────────────────────────────────────────────────
-def scan_scanned_pdf_ocr(file_bytes, df_rules):
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    extracted_text = ""
-    reader = load_ocr_engine()
-
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img_bytes = pix.tobytes("png")
-        results = reader.readtext(img_bytes, detail=0)
-        extracted_text += " ".join(results) + "\n"
-
-    text_lower = extracted_text.lower()
-    matched_school, matched_major = None, None
-    for _, row in df_rules.iterrows():
-        school = str(row['Truong_Dai_Hoc']).lower()
-        major  = str(row['Chuyen_Nganh']).lower()
-        if school in text_lower and major in text_lower:
-            matched_school = row['Truong_Dai_Hoc']
-            matched_major  = row['Chuyen_Nganh']
-            break
-
-    with st.expander("🔍 Nhật ký hệ thống - Dữ liệu chữ trích xuất:"):
-        st.text(extracted_text if extracted_text.strip() else "[Không tìm thấy ký tự]")
-
-    if matched_school and matched_major:
-        return True, matched_school, matched_major
-    return False, None, None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -226,11 +432,13 @@ if 'user_email' not in st.session_state:
 if 'ung_vien_id' not in st.session_state:
     st.session_state.ung_vien_id = None
 if 'ocr_status' not in st.session_state:
-    st.session_state.ocr_status = None
+    st.session_state.ocr_status = None      # None | 'OCR_OK' | 'OCR_NO_TEXT'
 if 'ocr_school' not in st.session_state:
-    st.session_state.ocr_school = ""
+    st.session_state.ocr_school = ""        # trường trích xuất được từ văn bằng (để lưu/đối chiếu)
 if 'ocr_major' not in st.session_state:
-    st.session_state.ocr_major = ""
+    st.session_state.ocr_major = ""         # ngành trích xuất được từ văn bằng (để lưu/đối chiếu)
+if 'ocr_prefilled_file' not in st.session_state:
+    st.session_state.ocr_prefilled_file = None   # tránh điền lại/ghi đè khi rerun cùng 1 file
 if 'cm_items' not in st.session_state:
     st.session_state.cm_items = [0]
 if 'cm_counter' not in st.session_state:
@@ -305,6 +513,12 @@ else:
     # ─────────────────────────────────────────────────────────────────
     st.markdown("<div class='vcb-blue-bar'>▼ Tài liệu của tôi</div>", unsafe_allow_html=True)
     st.markdown("<div class='vcb-upload-note'>Các loại tệp được chấp nhận: DOCX, PDF, Hình ảnh và Văn bản</div>", unsafe_allow_html=True)
+    st.caption(
+        "🔍 Hệ thống sẽ tự động quét văn bằng bằng OCR và **gợi ý điền sẵn** một số trường bên dưới "
+        "(họ tên, ngày sinh, trường, chuyên ngành...). Đây chỉ là công cụ hỗ trợ tham khảo — "
+        "**vui lòng luôn kiểm tra & chỉnh sửa lại** cho đúng trước khi nộp đơn. Quyết định xét duyệt "
+        "hồ sơ luôn dựa trên toàn bộ thông tin bạn tự khai, có đối chiếu chéo với văn bằng đã quét."
+    )
 
     uploaded_file = st.file_uploader(
         "Sơ yếu lý lịch / Bằng đại học (Dạng PDF ảnh scan):",
@@ -321,22 +535,139 @@ else:
             )
             st.session_state.ocr_status = None
         else:
-            file_bytes = uploaded_file.read()
-            df_rules   = get_recruitment_rules()
-            with st.spinner("⏳ Hệ thống đang quét tự động thông tin bề mặt văn bằng bằng công cụ OCR..."):
-                success, school, major = scan_scanned_pdf_ocr(file_bytes, df_rules)
-                if success:
-                    st.session_state.ocr_status = "APPROVE"
-                    st.session_state.ocr_school = school
-                    st.session_state.ocr_major  = major
-                else:
-                    st.session_state.ocr_status = "DENY"
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            # Chỉ chạy OCR + điền sẵn form 1 LẦN cho mỗi file (tránh ghi đè
+            # mỗi khi Streamlit rerun do người dùng gõ phím ở ô khác)
+            if st.session_state.ocr_prefilled_file != file_id:
+                file_bytes = uploaded_file.read()
+                with st.spinner("⏳ Hệ thống đang quét tự động thông tin văn bằng bằng công cụ OCR..."):
+                    raw_text = run_ocr_on_pdf(file_bytes)
+                    fields = extract_diploma_fields(raw_text)
 
-    if st.session_state.ocr_status is not None:
+                st.session_state.ocr_prefilled_file = file_id
+                # 3 trạng thái rõ ràng — KHÔNG được đồng nhất "đọc được chữ" với
+                # "trích xuất được field cụ thể nào" (đây chính là lỗi khiến banner
+                # báo thành công dù form không được điền field nào cả):
+                if not raw_text.strip():
+                    st.session_state.ocr_status = "OCR_NO_TEXT"       # không đọc được chữ gì
+                elif not fields:
+                    st.session_state.ocr_status = "OCR_TEXT_NO_FIELD" # đọc được chữ nhưng không khớp field nào
+                else:
+                    st.session_state.ocr_status = "OCR_OK"            # có ít nhất 1 field được điền sẵn
+                st.session_state.ocr_school = fields.get("truong", "")
+                st.session_state.ocr_major  = fields.get("chuyen_nganh", "")
+
+                # ── Điền sẵn (prefill) vào form — ứng viên vẫn chỉnh sửa được bình thường ──
+                if fields.get("ho_ten"):
+                    ho_dem, ten = _tach_ho_ten(fields["ho_ten"])
+                    if ten:
+                        st.session_state["form_ten"] = ten
+                    if ho_dem:
+                        st.session_state["form_ho"] = ho_dem
+                if fields.get("ngay_sinh"):
+                    st.session_state["form_dob"] = fields["ngay_sinh"]
+
+                first_cm_idx = st.session_state.cm_items[0]
+                if fields.get("truong"):
+                    st.session_state[f"cm_school_name_{first_cm_idx}"] = fields["truong"]
+
+                    # Tự động chọn "Loại trường" nếu nhận diện được là 1 trong các
+                    # trường công lập trong nước quen thuộc (NEU/FTU/AOF/BA...).
+                    # Danh sách khớp với TRUONG_CONG_LAP_OK trong database.py để nhất
+                    # quán với rule xét duyệt thật — nếu sau này thêm trường công lập
+                    # mới vào rule xét duyệt, nhớ bổ sung cả ở đây.
+                    _TRUONG_CONG_LAP_KEYWORDS = [
+                        "kinh te quoc dan", "neu", "ngoai thuong", "ftu",
+                        "hoc vien tai chinh", "aof", "hoc vien ngan hang", "ba",
+                    ]
+                    if any(k in _khong_dau(fields["truong"]) for k in _TRUONG_CONG_LAP_KEYWORDS):
+                        st.session_state[f"cm_school_type_{first_cm_idx}"] = "Trường Công lập đào tạo trong nước"
+
+                _TRINH_DO_OPT = ["Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"]
+                _VAN_BANG_OPT = ["Cử nhân", "Kỹ sư"]
+                _LOAI_HINH_OPT = ["Chính quy", "Tại chức", "Liên thông"]
+                _XEP_LOAI_OPT = ["Xuất sắc", "Giỏi", "Khá", "Trung bình", "Yếu"]
+                _NHOM_MAJORS = {
+                    "Khối ngành Kinh tế - Quản lý": ["Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"],
+                    "Khối ngành CNTT": ["Trí tuệ nhân tạo", "Khoa học máy tính", "Kỹ thuật máy tính"],
+                    "Khối ngành Luật": ["Luật kinh tế", "Luật dân sự", "Luật quốc tế"],
+                    "Khối ngành Kỹ thuật": ["Kỹ thuật điện", "Kỹ thuật cơ khí", "Kỹ thuật xây dựng"],
+                }
+
+                def _map_option(value, options):
+                    if not value:
+                        return None
+                    v = _khong_dau(value)
+                    for opt in options:
+                        if _khong_dau(opt) in v or v in _khong_dau(opt):
+                            return opt
+                    return None
+
+                if fields.get("van_bang"):
+                    m = _map_option(fields["van_bang"], _VAN_BANG_OPT)
+                    if m:
+                        st.session_state[f"cm_degree_{first_cm_idx}"] = m
+                        if not fields.get("trinh_do") and m == "Cử nhân":
+                            st.session_state[f"cm_level_{first_cm_idx}"] = "Đại học"
+                if fields.get("loai_hinh"):
+                    m = _map_option(fields["loai_hinh"], _LOAI_HINH_OPT)
+                    if m:
+                        st.session_state[f"cm_train_type_{first_cm_idx}"] = m
+                if fields.get("xep_loai"):
+                    m = _map_option(fields["xep_loai"], _XEP_LOAI_OPT)
+                    if m:
+                        st.session_state[f"cm_rank_{first_cm_idx}"] = m
+
+                # Chuyên ngành: thử khớp vào 1 trong các nhóm có sẵn; nếu không
+                # khớp được nhóm nào thì đẩy sang "Khác" + điền text tự do
+                if fields.get("chuyen_nganh"):
+                    matched_group, matched_major = None, None
+                    for grp, majors in _NHOM_MAJORS.items():
+                        m = _map_option(fields["chuyen_nganh"], majors)
+                        if m:
+                            matched_group, matched_major = grp, m
+                            break
+                    if matched_group:
+                        st.session_state[f"cm_group_{first_cm_idx}"] = matched_group
+                        st.session_state[f"cm_major_select_{first_cm_idx}"] = matched_major
+                    else:
+                        st.session_state[f"cm_group_{first_cm_idx}"] = "Khác"
+                        st.session_state[f"cm_major_text_{first_cm_idx}"] = fields["chuyen_nganh"]
+
+                with st.expander("🔍 Nhật ký hệ thống — Dữ liệu chữ OCR trích xuất được"):
+                    st.text(raw_text.strip() if raw_text.strip() else "[Không nhận diện được ký tự nào trên văn bằng]")
+                    if fields:
+                        st.markdown("**Các trường đã tự động nhận diện & điền sẵn vào form bên dưới:**")
+                        st.json(fields)
+                    else:
+                        st.warning("Không trích xuất được trường thông tin có cấu trúc nào — vui lòng tự điền form thủ công.")
+
+                st.rerun()
+
+    if st.session_state.ocr_status == "OCR_OK":
         st.markdown("""
             <div style='background:#E3F2FD;border-left:4px solid #29B6F6;padding:10px 15px;
                         border-radius:4px;margin-top:8px;font-size:13px;color:#0D47A1;'>
-                ✅ Hệ thống đã tiếp nhận và xử lý tệp đính kèm thành công.
+                ✅ Hệ thống đã quét văn bằng và điền sẵn một số trường thông tin bên dưới.
+                Vui lòng kiểm tra lại & chỉnh sửa nếu cần trước khi nộp đơn.
+            </div>
+        """, unsafe_allow_html=True)
+    elif st.session_state.ocr_status == "OCR_TEXT_NO_FIELD":
+        st.markdown("""
+            <div style='background:#FFF3E0;border-left:4px solid #FB8C00;padding:10px 15px;
+                        border-radius:4px;margin-top:8px;font-size:13px;color:#E65100;'>
+                ⚠️ Hệ thống đọc được chữ trên văn bằng nhưng KHÔNG nhận diện được trường thông tin
+                cụ thể nào (họ tên/trường/ngành...) để tự điền — có thể do văn bằng dùng font/định dạng
+                chưa có trong danh mục nhận diện. Xem chi tiết chữ đã quét ở mục "🔍 Nhật ký hệ thống"
+                bên dưới, và vui lòng tự điền đầy đủ thông tin bằng tay.
+            </div>
+        """, unsafe_allow_html=True)
+    elif st.session_state.ocr_status == "OCR_NO_TEXT":
+        st.markdown("""
+            <div style='background:#FFF3E0;border-left:4px solid #FB8C00;padding:10px 15px;
+                        border-radius:4px;margin-top:8px;font-size:13px;color:#E65100;'>
+                ⚠️ Hệ thống không nhận diện được chữ trên văn bằng (ảnh mờ/nghiêng/độ phân giải thấp).
+                Vui lòng tự điền đầy đủ thông tin bên dưới bằng tay.
             </div>
         """, unsafe_allow_html=True)
 
@@ -349,12 +680,12 @@ else:
         st.caption("Vui lòng điền thông tin cá nhân của bạn. Các trường dấu (*) là bắt buộc.")
 
         c1, c2, c3 = st.columns(3)
-        with c1: name_ten = st.text_input("Tên:*", value="")
-        with c2: name_ho  = st.text_input("Họ và tên đệm:*", value="")
+        with c1: name_ten = st.text_input("Tên:*", key="form_ten")
+        with c2: name_ho  = st.text_input("Họ và tên đệm:*", key="form_ho")
         with c3: gender   = st.selectbox("Giới tính:*", ["Lựa chọn", "Nam", "Nữ", "Khác"])
 
         c1, c2, c3 = st.columns(3)
-        with c1: dob     = st.text_input("Ngày sinh (DD/MM/YYYY):*", value="", placeholder="Ví dụ: 07/04/2002")
+        with c1: dob     = st.text_input("Ngày sinh (DD/MM/YYYY):*", key="form_dob", placeholder="Ví dụ: 07/04/2002")
         with c2: pob     = st.text_input("Nơi sinh:*", value="")
         with c3: address = st.text_input("Địa chỉ hiện tại:*", value="")
 
@@ -635,7 +966,8 @@ else:
     # Nút Đăng xuất sidebar
     if st.sidebar.button("Đăng xuất (Reset Test)"):
         for key in ["logged_in", "user_email", "ung_vien_id",
-                    "ocr_status", "ocr_school", "ocr_major",
+                    "ocr_status", "ocr_school", "ocr_major", "ocr_prefilled_file",
+                    "form_ten", "form_ho", "form_dob",
                     "cm_items", "nn_items", "cm_counter", "nn_counter"]:
             if key in st.session_state:
                 del st.session_state[key]

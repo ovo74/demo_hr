@@ -2,6 +2,9 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import os
+import unicodedata
+import re
+from io import BytesIO
 from datetime import datetime, date
 
 st.set_page_config(
@@ -149,6 +152,9 @@ FOREIGN = ["nước ngoài", "quốc tế", "international", "foreign"]
 # Nhóm chuyên ngành được chấp nhận
 NHOM_CHAP_NHAN = ["kinh tế - quản lý", "kinh te - quan ly"]
 
+# Chuyên ngành CỤ THỂ bị loại dù nằm trong nhóm Kinh tế - Quản lý
+CHUYEN_NGANH_LOAI_TRU = ["hải quan", "hai quan"]
+
 # Với trường công lập trong nước: chỉ chấp nhận 4 trường
 TRUONG_CONG_LAP_OK = [
     "kinh tế quốc dân", "neu",           # NEU
@@ -192,9 +198,91 @@ def check_language_phong_van(ds_nn: list) -> bool:
     return False
 
 
+def _khong_dau(s: str) -> str:
+    """Bỏ dấu tiếng Việt + hạ chữ thường, dùng để so khớp mờ (OCR thường mất dấu)."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d").replace("Đ", "D")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+# Các nhóm tên trường tương đương (tiếng Việt / tiếng Anh / viết tắt) — để đối
+# chiếu OCR không báo nhầm "lệch thông tin" khi văn bằng ghi tên tiếng Anh
+# nhưng ứng viên khai tên tiếng Việt của CHÍNH trường đó (hoặc ngược lại).
+_TRUONG_DONG_NGHIA = [
+    ["học viện ngân hàng", "banking academy"],
+    ["đại học kinh tế quốc dân", "national economics university", "neu"],
+    ["đại học ngoại thương", "foreign trade university", "ftu"],
+    ["học viện tài chính", "academy of finance", "aof"],
+    ["đại học bách khoa hà nội", "hanoi university of science and technology"],
+    ["đại học troy", "troy university"],
+    ["đại học rmit", "rmit university"],
+]
+
+
+def _cung_truong(ten_a: str, ten_b: str) -> bool:
+    """True nếu 2 tên trường được coi là cùng 1 trường (khớp trực tiếp hoặc cùng nhóm đồng nghĩa)."""
+    na, nb = _khong_dau(ten_a), _khong_dau(ten_b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    for nhom in _TRUONG_DONG_NGHIA:
+        nhom_kd = [_khong_dau(k) for k in nhom]
+        if any(k in na for k in nhom_kd) and any(k in nb for k in nhom_kd):
+            return True
+    return False
+
+
+def doi_chieu_ocr(c, ds_cm):
+    """
+    So khớp dữ liệu OCR trích xuất từ văn bằng (c['ocr_truong'], c['ocr_chuyen_nganh'])
+    với thông tin ứng viên TỰ KHAI trong ds_cm.
+    OCR chỉ đóng vai trò THAM KHẢO/ĐỐI CHIẾU — không tự ý approve/deny.
+    Trả về list các câu cảnh báo lệch thông tin (rỗng nếu khớp hoặc không có OCR).
+    """
+    ocr_status = (c.get("ocr_status") or "").strip()
+    ocr_truong = (c.get("ocr_truong") or "").strip()
+    ocr_nganh  = (c.get("ocr_chuyen_nganh") or "").strip()
+
+    # Không có văn bằng OCR được, hoặc chưa nộp file -> không đối chiếu được
+    if not ocr_truong and not ocr_nganh:
+        return []
+
+    canh_bao = []
+    truong_khop = any(
+        _cung_truong(ocr_truong, cm.get("ten_truong")) for cm in ds_cm
+    ) if ocr_truong else True
+
+    nganh_khop = any(
+        _khong_dau(ocr_nganh) and _khong_dau(ocr_nganh) in _khong_dau(cm.get("chuyen_nganh"))
+        or _khong_dau(cm.get("chuyen_nganh") or "") in _khong_dau(ocr_nganh)
+        for cm in ds_cm
+    ) if ocr_nganh else True
+
+    if ocr_truong and not truong_khop:
+        canh_bao.append(
+            f"Tên trường tự khai không khớp với văn bằng đã quét (OCR đọc được: \"{ocr_truong}\")"
+        )
+    if ocr_nganh and not nganh_khop:
+        canh_bao.append(
+            f"Chuyên ngành tự khai không khớp với văn bằng đã quét (OCR đọc được: \"{ocr_nganh}\")"
+        )
+    return canh_bao
+
+
 def compute_status(c, ds_cm, ds_nn=None):
-    """Trả về (computed_status, [lý do deny]).
-    Thứ tự ưu tiên: deny → cho_duyet → phong_van → approve
+    """Trả về (computed_status, [lý do deny/cảnh báo]).
+    Thứ tự ưu tiên: deny → cho_duyet (nước ngoài/điểm không rõ/OCR lệch) → phong_van → approve
+
+    Lưu ý về OCR: dữ liệu OCR quét từ văn bằng (ocr_truong, ocr_chuyen_nganh trong `c`)
+    KHÔNG được dùng làm căn cứ tự động approve/deny. Nó chỉ được dùng để ĐỐI CHIẾU chéo
+    với thông tin ứng viên tự khai (ds_cm) — quyết định cuối cùng vẫn luôn dựa trên toàn
+    bộ thông tin ứng viên tự khai + tất cả rule nghiệp vụ hiện có. Nếu OCR phát hiện lệch
+    thông tin, hồ sơ sẽ được đẩy về "Chờ duyệt" để admin xem xét thủ công thay vì tự động
+    approve/deny, đúng tinh thần "OCR là công cụ tham khảo, không phải công cụ quyết định".
     """
     ds_nn = ds_nn or []
     reasons = []
@@ -211,6 +299,7 @@ def compute_status(c, ds_cm, ds_nn=None):
         reasons.append("Không xác định ngày sinh")
 
     recheck       = False
+    diem_khong_xac_dinh = False   # điểm có giá trị nhưng không rõ theo thang nào -> cho_duyet
     is_phong_van  = True   # bắt đầu True, loại dần
     xet_phong_van_xep_loai  = False
     xet_phong_van_ngay      = False
@@ -234,8 +323,11 @@ def compute_status(c, ds_cm, ds_nn=None):
             reasons.append("Trình độ Cao đẳng không hợp lệ")
 
         # ── 3. Điểm tổng kết ──
+        # Nếu có điểm nhưng KHÔNG xác định được đang theo thang nào (không phải
+        # dạng "x/y", và thang_diem không chứa "/10" hay "/4") thì KHÔNG được
+        # coi là mặc nhiên đạt — phải đẩy vào diện chờ duyệt để admin xét tay.
         try:
-            if "/" in diem:
+            if diem and "/" in diem:
                 p  = diem.split("/")
                 dv = float(p[0].replace(",", "."))
                 sc = float(p[1].replace(",", "."))
@@ -243,14 +335,17 @@ def compute_status(c, ds_cm, ds_nn=None):
                     reasons.append(f"Điểm {dv}/{sc} < 6.5")
                 elif 3 <= sc < 9 and dv < 2.5:
                     reasons.append(f"Điểm {dv}/{sc} < 2.5")
-            else:
+            elif diem:
                 dv = float(diem.replace(",", "."))
                 if "/10" in thang and dv < 6.5:
                     reasons.append(f"Điểm {dv}/10 < 6.5")
                 elif "/4" in thang and dv < 2.5:
                     reasons.append(f"Điểm {dv}/4 < 2.5")
+                elif "/10" not in thang and "/4" not in thang:
+                    diem_khong_xac_dinh = True
         except Exception:
-            pass
+            if diem:
+                diem_khong_xac_dinh = True
 
         # ── 4. Loại hình đào tạo ──
         if lh and "chính quy" not in lh.lower():
@@ -264,6 +359,13 @@ def compute_status(c, ds_cm, ds_nn=None):
                 f"Nhóm chuyên ngành '{cm.get('nhom_chuyen_nganh')}' "
                 f"không phù hợp vị trí Chuyên viên Khách hàng "
                 f"(chỉ chấp nhận khối Kinh tế - Quản lý)"
+            )
+
+        # ── 5b. Chuyên ngành cụ thể bị loại trừ (dù nhóm là Kinh tế - Quản lý) ──
+        if cn and any(k in cn for k in CHUYEN_NGANH_LOAI_TRU):
+            reasons.append(
+                f"Chuyên ngành '{cm.get('chuyen_nganh')}' không thuộc diện "
+                f"đủ điều kiện thi tuyển (Hải quan và nghiệp vụ ngoại thương bị loại trừ)"
             )
 
         # ── 6. Tên trường (áp dụng mọi trường trong nước; nước ngoài → recheck) ──
@@ -295,6 +397,16 @@ def compute_status(c, ds_cm, ds_nn=None):
         return "deny", reasons
     if recheck:
         return "cho_duyet", []        # Trường nước ngoài → admin xét thủ công
+    if diem_khong_xac_dinh:
+        return "cho_duyet", []        # Không rõ thang điểm → admin xét thủ công
+
+    # ── OCR đối chiếu (chỉ tham khảo, KHÔNG tự ý approve/deny) ──
+    # Nếu hồ sơ đang trên đà approve/phỏng vấn nhưng OCR phát hiện lệch thông tin
+    # so với khai báo, đẩy về cho_duyet để admin xem xét thủ công thay vì tự động duyệt.
+    canh_bao_ocr = doi_chieu_ocr(c, ds_cm)
+    if canh_bao_ocr:
+        return "cho_duyet", canh_bao_ocr
+
     if du_phong_van:
         return "phong_van", []        # Đủ 3 điều kiện → phỏng vấn thẳng
     return "approve", []
@@ -455,6 +567,15 @@ def detail_dialog(rec):
     elif comp_status == "recheck":
         st.divider()
         st.warning("⚠️ Trường / Quốc gia nước ngoài — Admin cần xem xét và quyết định thủ công.")
+    elif comp_status == "cho_duyet" and rec.get("deny_reasons"):
+        st.divider()
+        st.markdown("##### 🔍 Hệ thống phát hiện lệch dữ liệu OCR — cần Admin đối chiếu thủ công")
+        st.caption(
+            "OCR chỉ mang tính tham khảo/đối chiếu chéo với thông tin ứng viên tự khai, "
+            "KHÔNG tự động approve hay deny hồ sơ."
+        )
+        for r in rec["deny_reasons"]:
+            st.warning(f"• {r}")
 
     st.divider()
 
@@ -731,10 +852,26 @@ else:
     if sel and 0 <= sel[0] < len(filtered):
         detail_dialog(filtered[sel[0]])
 
-    st.markdown(
-        "<div style='font-size:11px;color:#bbb;padding:3px 0 10px;'>"
-        "💡 Nhấp vào dòng bất kỳ để xem đầy đủ thông tin và thay đổi trạng thái duyệt</div>",
-        unsafe_allow_html=True)
+    hint_col, export_col = st.columns([3, 1])
+    with hint_col:
+        st.markdown(
+            "<div style='font-size:11px;color:#bbb;padding:3px 0 10px;'>"
+            "💡 Nhấp vào dòng bất kỳ để xem đầy đủ thông tin và thay đổi trạng thái duyệt</div>",
+            unsafe_allow_html=True)
+    with export_col:
+        # Xuất đúng danh sách đang hiển thị (đã áp bộ lọc) ra file Excel
+        export_df = df_display.drop(columns=["👁 Chi tiết"])
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            export_df.to_excel(writer, index=False, sheet_name="Ung vien")
+        st.download_button(
+            label="📊 Xuất Excel",
+            data=excel_buffer.getvalue(),
+            file_name=f"danh_sach_ung_vien_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="export_excel_btn",
+        )
 
     # ── Nút Duyệt danh sách ──
     st.markdown("---")
