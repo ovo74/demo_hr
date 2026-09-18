@@ -187,21 +187,122 @@ def load_ocr_engine():
 # ─────────────────────────────────────────────────────────────────────
 # QUÉT OCR VĂN BẰNG — trả về (raw_text, extracted_fields_dict)
 # ─────────────────────────────────────────────────────────────────────
+def _dung_lai_thu_tu_doc(results, y_tolerance_ratio: float = 0.6) -> str:
+    """Dựng lại đúng thứ tự đọc tự nhiên (trên→dưới, trái→phải) từ danh sách
+    (bbox, text, conf) EasyOCR trả về, dựa vào toạ độ thật của từng cụm chữ —
+    thay vì tin vào thứ tự mặc định của EasyOCR.
+
+    Lý do cần việc này: EasyOCR chỉ nhóm các cụm chữ theo vùng phát hiện được,
+    KHÔNG hiểu layout dạng bảng/nhiều cột (VD "Nhãn tiếng Việt : Giá trị" xếp
+    cạnh nhau, hoặc 2 cột song ngữ Việt-Anh). Với layout này, thứ tự trả về
+    mặc định rất hay bị xáo trộn — nhãn của dòng này bị ghép nhầm với giá trị
+    của dòng khác, khiến regex khớp nhầm sang câu hoàn toàn không liên quan
+    (VD từng bắt nhầm "...tốt nghiệp theo Quyết định..." thành tên ứng viên).
+    Thuật toán: gộp các cụm có tâm-y gần nhau thành 1 "dòng", sắp các dòng
+    theo y tăng dần, trong mỗi dòng sắp theo x tăng dần rồi nối lại."""
+    items = []
+    for bbox, text, conf in results:
+        ys = [p[1] for p in bbox]
+        xs = [p[0] for p in bbox]
+        items.append({
+            "text": text, "y": sum(ys) / len(ys), "x": min(xs),
+            "h": max(ys) - min(ys) or 1,
+        })
+    items.sort(key=lambda it: it["y"])
+
+    lines = []
+    for it in items:
+        placed = False
+        for line in lines:
+            if abs(line["y"] - it["y"]) <= max(it["h"], line["h"]) * y_tolerance_ratio:
+                line["items"].append(it)
+                line["y"] = sum(x["y"] for x in line["items"]) / len(line["items"])
+                line["h"] = max(line["h"], it["h"])
+                placed = True
+                break
+        if not placed:
+            lines.append({"y": it["y"], "h": it["h"], "items": [it]})
+
+    lines.sort(key=lambda l: l["y"])
+    out = []
+    for line in lines:
+        line["items"].sort(key=lambda it: it["x"])
+        out.append(" ".join(it["text"] for it in line["items"]))
+    return "\n".join(out)
+
+
 def run_ocr_on_pdf(file_bytes):
-    """Quét toàn bộ PDF (mỗi trang scale 3x + tiền xử lý ảnh) và ghép text."""
+    """Quét toàn bộ PDF (mỗi trang scale 3x + tiền xử lý ảnh) và ghép text.
+    Dùng detail=1 để lấy cả toạ độ (bbox) lẫn độ tin cậy (confidence) của từng
+    cụm chữ EasyOCR nhận diện được:
+      - Loại bỏ cụm có độ tin cậy quá thấp (rác/ký tự đọc sai).
+      - Dựng lại đúng thứ tự đọc theo toạ độ thay vì tin thứ tự mặc định của
+        EasyOCR — quan trọng với layout dạng bảng "Nhãn : Giá trị" hay song
+        ngữ Việt-Anh, tránh khớp nhãn với sai giá trị."""
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     reader = load_ocr_engine()
     extracted_text = ""
+    MUC_TIN_CAY_TOI_THIEU = 0.35  # cụm chữ dưới ngưỡng này bị loại, không đưa vào text
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         # Scale 3x thay vì 2x để giữ được chi tiết chữ nhỏ trên văn bằng scan
         pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
         processed = _preprocess_page_for_ocr(pix)
-        results = reader.readtext(processed, detail=0, paragraph=False)
-        extracted_text += " ".join(results) + "\n"
+        results = reader.readtext(processed, detail=1, paragraph=False)
+        # Mỗi phần tử: (bbox, text, confidence)
+        results = [r for r in results if r[2] >= MUC_TIN_CAY_TOI_THIEU]
+        extracted_text += _dung_lai_thu_tu_doc(results) + "\n"
 
     return extracted_text
+
+
+# Vietnamese không dùng các chữ cái j, f, w, z (trừ vài từ mượn/tên nước ngoài
+# hiếm gặp) — sự xuất hiện của chúng trong tên trích xuất gần như chắc chắn là
+# OCR đọc sai ký tự, không phải tên thật.
+_KY_TU_KHONG_PHAI_TIENG_VIET = set("jfwzJFWZ")
+_NGUYEN_AM = set("aeiouyàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹ"
+                 "AEIOUYÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸ")
+
+# Nếu regex khớp NHẦM vào một câu hành chính (do layout bảng/nhiều cột khiến
+# nhãn-giá trị bị xáo trộn), kết quả thường dính các từ này — chặn thêm 1 lớp
+# an toàn nữa ngoài việc dựng lại thứ tự đọc theo toạ độ (_dung_lai_thu_tu_doc).
+_TU_HANH_CHINH_KHONG_PHAI_TEN = [
+    "quyết định", "công nhận", "tốt nghiệp", "chứng nhận", "xác nhận",
+    "ngày tháng năm", "số hiệu", "căn cứ", "theo quyết", "hội đồng",
+    "hiệu trưởng", "trường đại học", "học viện", "bộ giáo dục",
+    # "Sinh viên"/"Học viên" bản thân là NHÃN (tương đương "Student"), không
+    # phải tên người — nhưng lại là 2 từ tiếng Việt hợp lệ về ký tự nên có thể
+    # lọt qua các kiểm tra chính tả phía dưới nếu quy trình khớp nhãn-giá trị
+    # bị lệch (VD do OCR đọc layout bảng/cột sai thứ tự). Coi đây là 1 lớp
+    # chặn riêng, độc lập với chuyện OCR đọc đúng/sai ký tự.
+    "sinh viên", "học viên", "họ và tên", "họ tên",
+]
+
+def _ten_hop_le(ten: str) -> bool:
+    """Kiểm tra nhanh 1 cụm từ trong tên có hợp lý là tiếng Việt hay không —
+    dùng để CHẶN việc điền sẵn những cái tên rõ ràng bị OCR đọc sai (VD
+    "Tiij", "liạnii") hoặc bị khớp nhầm sang câu hành chính không liên quan
+    (VD "Nhận Tốt Nghiệp Theo Quyết") thay vì hiển thị nhầm dữ liệu cho ứng viên."""
+    if not ten or not ten.strip():
+        return False
+    ten_kd = _khong_dau(ten)
+    if any(_khong_dau(tu) in ten_kd for tu in _TU_HANH_CHINH_KHONG_PHAI_TEN):
+        return False                                       # khớp nhầm câu hành chính
+    if len(ten.split()) > 5:
+        return False                                       # tên người VN hiếm khi >5 từ
+    for tu in ten.split():
+        loi = re.sub(r"[^A-Za-zÀ-ỹ]", "", tu)
+        if not loi:
+            continue
+        if any(ch in _KY_TU_KHONG_PHAI_TIENG_VIET for ch in loi):
+            return False                                   # có j/f/w/z -> chắc chắn sai
+        if not any(ch in _NGUYEN_AM for ch in loi):
+            return False                                   # không có nguyên âm -> không phải từ thật
+        # Tiếng Việt không có ký tự lặp liên tiếp trong 1 âm tiết (VD "ii", "nn")
+        if re.search(r"(.)\1", loi, re.IGNORECASE):
+            return False
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -219,18 +320,43 @@ def run_ocr_on_pdf(file_bytes):
 #      trường/ngành phổ biến đáng tin cậy hơn nhiều so với bắt theo nhãn.
 # Toàn bộ kết quả CHỈ dùng để gợi ý điền sẵn — ứng viên luôn xem lại & sửa.
 # ─────────────────────────────────────────────────────────────────────
+# Nhiều văn bằng/giấy chứng nhận song ngữ có dạng "Nhãn (English aside) : giá trị"
+# — VD "Ngày Sinh (Date of birth) : 20/12/2003", "Sinh viên (Student) : LÊ THỊ HẠNH".
+# _LABEL_GAP cho phép 1 cụm "(...)" xen giữa nhãn và dấu ":" trước khi bắt giá trị.
+_LABEL_GAP = r"(?:\s*\([^)\n]{0,40}\))?\s*[:\-]?\s*"
+
 _NGAY_SINH_PATTERNS = [
     # "Ngày, tháng, năm sinh: dd/mm/yyyy" — kể cả khi OCR đọc nhầm "năm" -> "hăm"/"nam"
-    r"(?:ngày,?\s*tháng,?\s*)?(?:năm|nam|hăm)\s*sinh\s*[:\-]?\s*(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
-    r"(?:sinh\s*ngày|ngày\s*sinh)\s*[:\-]?\s*(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
+    r"(?:ngày,?\s*tháng,?\s*)?(?:năm|nam|hăm)\s*sinh" + _LABEL_GAP + r"(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
+    r"(?:sinh\s*ngày|ngày\s*sinh)" + _LABEL_GAP + r"(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{4})",
     r"sinh\s*ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})",
 ]
 
+# ── Tên riêng: bắt tối đa 5 TỪ, MỖI TỪ BẮT BUỘC viết hoa chữ cái đầu ──
+# Đây là điểm mấu chốt để tránh nuốt nhầm cả câu văn xuôi phía sau nhãn khi
+# không có dấu phẩy/ngắt dòng ngay sau tên (VD "Sinh viên ... đã hoàn thành
+# ... được công nhận tốt nghiệp theo Quyết định..." — nếu chỉ dừng ở dấu
+# phẩy/xuống dòng như trước, cụm capture sẽ nuốt luôn "được công nhận tốt
+# nghiệp theo Quyết" vì câu này không có dấu phẩy sớm). Tên riêng tiếng Việt
+# luôn viết hoa từng chữ cái đầu mỗi từ, còn văn xuôi thường chỉ viết hoa từ
+# đầu câu — ràng buộc "mọi từ đều hoa" nên tự dừng đúng ngay từ thường đầu tiên.
+_HOA = "A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ"
+_THUONG = "a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
+_TU_TEN = "[" + _HOA + "][" + _HOA + _THUONG + "]*"
+# QUAN TRỌNG: bọc trong (?-i:...) để ép PHÂN BIỆT hoa/thường cho riêng phần bắt
+# tên, dù pattern tổng thể được search với cờ re.IGNORECASE (để phần NHÃN như
+# "Họ và tên"/"HỌ VÀ TÊN" vẫn khớp được không phân biệt hoa/thường). Nếu không
+# tách riêng, re.IGNORECASE sẽ làm mất tác dụng của ràng buộc viết-hoa-đầu-từ,
+# khiến chữ thường phía sau tên (VD "...Bảo đã hoàn thành...") bị nuốt luôn
+# vào kết quả trích xuất (bug thật đã gặp: tên bị lẫn thêm chữ "đã").
+_TEN_RIENG = "(?-i:(" + _TU_TEN + r"(?:[ \t]+" + _TU_TEN + r"){1,4}))"
+
 _HOTEN_PATTERNS = [
-    r"họ\s*(?:và|,)?\s*tên(?:\s*(?:là|sinh\s*viên|học\s*viên))?\s*[:\-]?\s*"
-    r"([^\n\d,;]{3,60}?)(?=\s+sinh\s*ngày|\s+ngày\s*sinh|\s+nam\s*sinh|[\n,;]|$)",
+    r"họ\s*(?:và|,)?\s*tên(?:\s*(?:là|sinh\s*viên|học\s*viên))?" + _LABEL_GAP + _TEN_RIENG,
+    # Giấy chứng nhận/bảng điểm hay ghi nhãn "Sinh viên:" thay vì "Họ và tên:"
+    r"sinh\s*viên" + _LABEL_GAP + _TEN_RIENG,
     # Nhiều bản sao y/chứng thực văn bằng VN ghi "Bà/Ông <Họ tên>" — khá đáng tin cậy
-    r"(?:Bà|Ông)[ \t]+([A-ZÀ-Ỹ][a-zà-ỹ]+(?:[ \t]+[A-ZÀ-Ỹ][a-zà-ỹ]+){1,4})",
+    r"(?:Bà|Ông)[ \t]+" + _TEN_RIENG,
 ]
 
 # ── Văn bằng / Xếp loại / Loại hình đào tạo: so khớp trên bản KHÔNG DẤU ──
@@ -240,7 +366,12 @@ _HOTEN_PATTERNS = [
 # trường hợp này. So khớp không dấu + ánh xạ về nhãn tiếng Việt chuẩn
 # (canonical) vừa chịu lỗi OCR tốt hơn, vừa đảm bảo giá trị điền vào form
 # luôn đúng chính tả có dấu (không phụ thuộc OCR đọc đúng dấu hay không).
-_VAN_BANG_CANON = [("thac si", "Thạc sĩ"), ("tien si", "Tiến sĩ"), ("ky su", "Kỹ sư"), ("cu nhan", "Cử nhân")]
+_VAN_BANG_CANON = [
+    ("thac si", "Thạc sĩ"), ("master", "Thạc sĩ"),
+    ("tien si", "Tiến sĩ"), ("doctor", "Tiến sĩ"), ("phd", "Tiến sĩ"),
+    ("ky su", "Kỹ sư"), ("engineer", "Kỹ sư"),
+    ("cu nhan", "Cử nhân"), ("bachelor", "Cử nhân"),
+]
 _LOAI_HINH_CANON = [
     ("vua hoc vua lam", "Vừa học vừa làm"), ("lien thong", "Liên thông"),
     ("tai chuc", "Tại chức"), ("tu xa", "Từ xa"), ("chinh quy", "Chính quy"),
@@ -281,8 +412,9 @@ _KNOWN_SCHOOLS = [
 ]
 _KNOWN_MAJORS = [
     "Hệ thống thông tin quản lý", "Management Information System",
-    "Tài chính Ngân hàng", "Banking and Finance",
+    "Tài chính Ngân hàng", "Banking and Finance", "International Finance",
     "Quản trị Kinh doanh", "Business Administration",
+    "International Business Management", "Business Management",
     "Kế toán", "Accounting",
     "Kinh tế đối ngoại", "Công nghệ thông tin",
     "Kinh doanh Tổng hợp", "General Business",
@@ -290,11 +422,27 @@ _KNOWN_MAJORS = [
 ]
 
 
+def _chua_tu(candidate: str, text: str) -> bool:
+    """Kiểm tra `candidate` có xuất hiện trong `text` hay không (không dấu).
+    Với candidate NGẮN (<=4 ký tự, VD viết tắt "BA", "FTU", "NEU") bắt buộc
+    khớp NGUYÊN TỪ (word-boundary) — tránh false-positive kiểu "BA" khớp
+    nhầm vào trong "minh Bao" (chuỗi con "ba" nằm giữa 1 từ khác hoàn toàn
+    không liên quan). Candidate dài hơn vẫn dùng so khớp chuỗi con như cũ vì
+    ít rủi ro trùng ngẫu nhiên hơn nhiều."""
+    cand_kd = _khong_dau(candidate)
+    text_kd = _khong_dau(text)
+    if not cand_kd:
+        return False
+    if len(cand_kd.replace(" ", "")) <= 4:
+        return re.search(r"\b" + re.escape(cand_kd) + r"\b", text_kd) is not None
+    return cand_kd in text_kd
+
+
 def _dict_match(text: str, candidates: list):
     """So khớp mờ (bỏ dấu) — trả về ứng viên KHỚP DÀI NHẤT tìm thấy trong text (hoặc None)."""
     best = None
     for cand in candidates:
-        if _khong_dau(cand) in _khong_dau(text):
+        if _chua_tu(cand, text):
             if best is None or len(cand) > len(best):
                 best = cand
     return best
@@ -329,10 +477,12 @@ def extract_diploma_fields(raw_text: str) -> dict:
                 break
 
     for pat in _HOTEN_PATTERNS:
-        m = re.search(pat, text)
+        m = re.search(pat, text, re.IGNORECASE)
         if m:
             val = re.sub(r"\s+", " ", m.group(1)).strip(" .,:;-")
-            if val:
+            # Chỉ nhận nếu tên trông hợp lý là tiếng Việt — tránh điền sẵn tên
+            # bị OCR đọc sai ký tự (VD "Tiij", "liạnii") như dữ liệu thật.
+            if val and _ten_hop_le(val):
                 result["ho_ten"] = val.title()
                 break
 
@@ -366,7 +516,7 @@ def extract_diploma_fields(raw_text: str) -> dict:
         df_rules = get_recruitment_rules()
         if "truong" not in result:
             for _, row in df_rules.iterrows():
-                if _khong_dau(str(row["Truong_Dai_Hoc"])) in _khong_dau(text):
+                if _chua_tu(str(row["Truong_Dai_Hoc"]), text):
                     result["truong"] = row["Truong_Dai_Hoc"]
                     break
     except Exception:
@@ -572,13 +722,17 @@ else:
                     st.session_state[f"cm_school_name_{first_cm_idx}"] = fields["truong"]
 
                     # Tự động chọn "Loại trường" nếu nhận diện được là 1 trong các
-                    # trường công lập trong nước quen thuộc (NEU/FTU/AOF/BA...).
-                    # Danh sách khớp với TRUONG_CONG_LAP_OK trong database.py để nhất
-                    # quán với rule xét duyệt thật — nếu sau này thêm trường công lập
-                    # mới vào rule xét duyệt, nhớ bổ sung cả ở đây.
+                    # trường công lập trong nước quen thuộc: NEU, FTU, AOF (Học viện
+                    # Tài chính), BA (Học viện Ngân hàng) — cả tên viết tắt lẫn tên
+                    # đầy đủ, tiếng Việt lẫn tiếng Anh (nhiều giấy chứng nhận song ngữ
+                    # chỉ có tên tiếng Anh). Chỉ áp dụng cho case tuyển CV Khách hàng
+                    # (khớp đúng TRUONG_CONG_LAP_OK trong database.py). Các trường
+                    # ngoài danh sách này: để ứng viên tự chọn Loại trường.
                     _TRUONG_CONG_LAP_KEYWORDS = [
-                        "kinh te quoc dan", "neu", "ngoai thuong", "ftu",
-                        "hoc vien tai chinh", "aof", "hoc vien ngan hang", "ba",
+                        "kinh te quoc dan", "neu", "national economics university",
+                        "ngoai thuong", "ftu", "foreign trade university",
+                        "hoc vien tai chinh", "aof", "academy of finance",
+                        "hoc vien ngan hang", "banking academy",
                     ]
                     if any(k in _khong_dau(fields["truong"]) for k in _TRUONG_CONG_LAP_KEYWORDS):
                         st.session_state[f"cm_school_type_{first_cm_idx}"] = "Trường Công lập đào tạo trong nước"
@@ -587,11 +741,38 @@ else:
                 _VAN_BANG_OPT = ["Cử nhân", "Kỹ sư"]
                 _LOAI_HINH_OPT = ["Chính quy", "Tại chức", "Liên thông"]
                 _XEP_LOAI_OPT = ["Xuất sắc", "Giỏi", "Khá", "Trung bình", "Yếu"]
+                # Cấu trúc: {nhóm: {giá_trị_dropdown_tiếng_Việt: [các từ khoá đồng
+                # nghĩa để NHẬN DIỆN, gồm cả tiếng Anh]}}. QUAN TRỌNG: giá trị gán
+                # vào dropdown "Chuyên ngành" LUÔN phải là key tiếng Việt (khớp đúng
+                # 1 trong các option có sẵn) — nếu gán thẳng từ khoá tiếng Anh vào,
+                # Streamlit sẽ ÂM THẦM bỏ qua vì không khớp option nào (không báo lỗi).
+                # Nhiều văn bằng/giấy xác nhận song ngữ OCR ra chuyên ngành tiếng Anh
+                # sạch hơn hẳn bản tiếng Việt (ít lỗi dấu/ký tự hơn), nên vẫn cần nhận
+                # diện được từ khoá tiếng Anh — chỉ là phải map ngược về tên tiếng Việt.
                 _NHOM_MAJORS = {
-                    "Khối ngành Kinh tế - Quản lý": ["Tài chính Ngân hàng", "Kế toán", "Quản trị Kinh doanh"],
-                    "Khối ngành CNTT": ["Trí tuệ nhân tạo", "Khoa học máy tính", "Kỹ thuật máy tính"],
-                    "Khối ngành Luật": ["Luật kinh tế", "Luật dân sự", "Luật quốc tế"],
-                    "Khối ngành Kỹ thuật": ["Kỹ thuật điện", "Kỹ thuật cơ khí", "Kỹ thuật xây dựng"],
+                    "Khối ngành Kinh tế - Quản lý": {
+                        "Tài chính Ngân hàng": ["Tài chính Ngân hàng", "Banking and Finance", "International Finance"],
+                        "Kế toán": ["Kế toán", "Accounting"],
+                        "Quản trị Kinh doanh": [
+                            "Quản trị Kinh doanh", "Business Administration",
+                            "International Business Management", "Business Management", "General Business",
+                        ],
+                    },
+                    "Khối ngành CNTT": {
+                        "Trí tuệ nhân tạo": ["Trí tuệ nhân tạo", "Artificial Intelligence"],
+                        "Khoa học máy tính": ["Khoa học máy tính", "Computer Science", "Information Technology"],
+                        "Kỹ thuật máy tính": ["Kỹ thuật máy tính", "Computer Engineering"],
+                    },
+                    "Khối ngành Luật": {
+                        "Luật kinh tế": ["Luật kinh tế", "Economic Law"],
+                        "Luật dân sự": ["Luật dân sự", "Civil Law"],
+                        "Luật quốc tế": ["Luật quốc tế", "International Law"],
+                    },
+                    "Khối ngành Kỹ thuật": {
+                        "Kỹ thuật điện": ["Kỹ thuật điện", "Electrical Engineering"],
+                        "Kỹ thuật cơ khí": ["Kỹ thuật cơ khí", "Mechanical Engineering"],
+                        "Kỹ thuật xây dựng": ["Kỹ thuật xây dựng", "Civil Engineering"],
+                    },
                 }
 
                 def _map_option(value, options):
@@ -622,10 +803,12 @@ else:
                 # khớp được nhóm nào thì đẩy sang "Khác" + điền text tự do
                 if fields.get("chuyen_nganh"):
                     matched_group, matched_major = None, None
-                    for grp, majors in _NHOM_MAJORS.items():
-                        m = _map_option(fields["chuyen_nganh"], majors)
-                        if m:
-                            matched_group, matched_major = grp, m
+                    for grp, majors_map in _NHOM_MAJORS.items():
+                        for canon_major, synonyms in majors_map.items():
+                            if _map_option(fields["chuyen_nganh"], synonyms):
+                                matched_group, matched_major = grp, canon_major
+                                break
+                        if matched_group:
                             break
                     if matched_group:
                         st.session_state[f"cm_group_{first_cm_idx}"] = matched_group
