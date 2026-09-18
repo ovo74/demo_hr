@@ -386,6 +386,18 @@ _XEP_LOAI_CANON = [
     ("trung binh", "Trung bình"), ("gioi", "Giỏi"), ("kha", "Khá"), ("yeu", "Yếu"),
 ]
 
+# "Trình độ" và "Bậc đào tạo" là 2 CÁCH GỌI TƯƠNG ĐƯƠNG của cùng 1 khái niệm
+# trên văn bằng thực tế (nhiều trường dùng "Bậc đào tạo" thay vì "Trình độ")
+# — cần nhận diện cả 2 nhãn để không bỏ sót field này khi văn bằng dùng cách
+# gọi khác với tên trường trong form.
+_TRINH_DO_LABEL_KD = r"(?:trinh\s*do|bac\s*dao\s*tao)\s*[:\-]?\s*"
+_TRINH_DO_CANON = [
+    ("tien si", "Tiến sĩ"), ("doctor", "Tiến sĩ"), ("phd", "Tiến sĩ"),
+    ("thac si", "Thạc sĩ"), ("master", "Thạc sĩ"),
+    ("dai hoc", "Đại học"), ("bachelor", "Đại học"), ("cu nhan", "Đại học"),
+    ("cao dang", "Cao đẳng"), ("college", "Cao đẳng"),
+]
+
 
 def _match_canon(text_kd: str, canon_list, window: str = None):
     """So khớp danh sách (từ_khóa_không_dấu, nhãn_chuẩn) trên bản text không dấu.
@@ -501,6 +513,12 @@ def extract_diploma_fields(raw_text: str) -> dict:
     van_bang = _match_canon(text_kd, _VAN_BANG_CANON)
     if van_bang:
         result["van_bang"] = van_bang
+
+    m = re.search(_TRINH_DO_LABEL_KD + r"(.{0,20})", text_kd)
+    if m:
+        trinh_do = _match_canon(text_kd, _TRINH_DO_CANON, window=m.group(1))
+        if trinh_do:
+            result["trinh_do"] = trinh_do
 
     # Trường / Chuyên ngành: so khớp từ điển thay vì bắt theo nhãn — vì nhãn
     # "Trường:"/"Ngành:" trên văn bằng thật rất hay bị OCR nuốt mất.
@@ -788,8 +806,17 @@ else:
                     m = _map_option(fields["van_bang"], _VAN_BANG_OPT)
                     if m:
                         st.session_state[f"cm_degree_{first_cm_idx}"] = m
-                        if not fields.get("trinh_do") and m == "Cử nhân":
-                            st.session_state[f"cm_level_{first_cm_idx}"] = "Đại học"
+
+                # "Trình độ"/"Bậc đào tạo" (2 nhãn tương đương) — ưu tiên field
+                # trích xuất trực tiếp; nếu văn bằng không ghi rõ, suy luận từ
+                # Văn bằng (Cử nhân/Kỹ sư -> Đại học) như phương án dự phòng.
+                if fields.get("trinh_do"):
+                    m = _map_option(fields["trinh_do"], _TRINH_DO_OPT)
+                    if m:
+                        st.session_state[f"cm_level_{first_cm_idx}"] = m
+                elif fields.get("van_bang") in ("Cử nhân", "Kỹ sư"):
+                    st.session_state[f"cm_level_{first_cm_idx}"] = "Đại học"
+
                 if fields.get("loai_hinh"):
                     m = _map_option(fields["loai_hinh"], _LOAI_HINH_OPT)
                     if m:
@@ -908,7 +935,7 @@ else:
             cm_c1, cm_c2, cm_c3 = st.columns(3)
             with cm_c1: st.text_input("Ngày bắt đầu:*",  placeholder="DD/MM/YYYY", key=f"cm_start_{idx}")
             with cm_c2: st.text_input("Ngày kết thúc:*", placeholder="DD/MM/YYYY", key=f"cm_end_{idx}")
-            with cm_c3: st.selectbox("Trình độ:*", ["Lựa chọn", "Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"], key=f"cm_level_{idx}")
+            with cm_c3: st.selectbox("Bậc đào tạo:*", ["Lựa chọn", "Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"], key=f"cm_level_{idx}")
 
             cm_c1, cm_c2, cm_c3 = st.columns(3)
             with cm_c1:
