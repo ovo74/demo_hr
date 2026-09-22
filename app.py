@@ -158,25 +158,6 @@ def _khong_dau(s: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# TIỀN XỬ LÝ ẢNH TRƯỚC KHI OCR — tăng độ chính xác cho văn bằng scan
-# (độ phân giải cao hơn + khử nhiễu + tăng tương phản nhị phân hoá thích ứng)
-# ─────────────────────────────────────────────────────────────────────
-def _preprocess_page_for_ocr(pix):
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    if pix.n == 4:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
-    elif pix.n == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = img[:, :, 0] if img.ndim == 3 else img
-    gray = cv2.bilateralFilter(gray, 9, 75, 75)
-    gray = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
-    )
-    return gray
-
-
-# ─────────────────────────────────────────────────────────────────────
 # CACHE ENGINE OCR
 # ─────────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -231,10 +212,61 @@ def _dung_lai_thu_tu_doc(results, y_tolerance_ratio: float = 0.6) -> str:
     return "\n".join(out)
 
 
+def _pix_to_gray(pix):
+    """Chuyển pixmap PyMuPDF -> ảnh grayscale numpy."""
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        return cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+    if pix.n == 3:
+        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return img[:, :, 0] if img.ndim == 3 else img
+
+
+_ROTATE_MAP = {
+    0: None,
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
+
+
+def _phat_hien_va_xoay(gray, reader):
+    """Tự động phát hiện chiều xoay đúng của trang (0/90/180/270°) rồi trả về
+    ảnh đã xoay đúng chiều. Nhiều tài liệu ghép từ CamScanner (đặc biệt khi
+    gộp ảnh dọc + ngang vào 1 PDF) bị lưu sai chiều — OCR trên ảnh sai chiều
+    gần như luôn ra rác hoàn toàn, dù chữ trên ảnh gốc rất rõ.
+
+    Cách làm: quét thử ở độ phân giải THẤP (rẻ, nhanh) tại cả 4 hướng, chấm
+    điểm mỗi hướng bằng tổng (độ tin cậy × số ký tự) nhận diện được — hướng
+    đúng luôn cho điểm vượt trội vì hướng sai gần như không đọc ra chữ có
+    nghĩa nào. Sau đó áp đúng hướng thắng cuộc lên ảnh gốc (độ phân giải cao)
+    để OCR thật."""
+    best_angle, best_score = 0, -1
+    h, w = gray.shape
+    scale = min(1.0, 900 / max(h, w))  # ảnh thử nhỏ để quét nhanh
+    small = cv2.resize(gray, (int(w * scale), int(h * scale))) if scale < 1.0 else gray
+
+    for angle, rot_code in _ROTATE_MAP.items():
+        test_img = cv2.rotate(small, rot_code) if rot_code is not None else small
+        try:
+            results = reader.readtext(test_img, detail=1, paragraph=False)
+        except Exception:
+            continue
+        score = sum(conf * len(text) for _bbox, text, conf in results)
+        if score > best_score:
+            best_score, best_angle = score, angle
+
+    rot_code = _ROTATE_MAP[best_angle]
+    return cv2.rotate(gray, rot_code) if rot_code is not None else gray
+
+
 def run_ocr_on_pdf(file_bytes):
     """Quét toàn bộ PDF (mỗi trang scale 3x + tiền xử lý ảnh) và ghép text.
     Dùng detail=1 để lấy cả toạ độ (bbox) lẫn độ tin cậy (confidence) của từng
     cụm chữ EasyOCR nhận diện được:
+      - Tự động phát hiện & xoay đúng chiều từng trang trước khi OCR chính
+        (xem _phat_hien_va_xoay) — quan trọng với PDF ghép nhiều ảnh có
+        trang bị xoay ngang/lộn ngược.
       - Loại bỏ cụm có độ tin cậy quá thấp (rác/ký tự đọc sai).
       - Dựng lại đúng thứ tự đọc theo toạ độ thay vì tin thứ tự mặc định của
         EasyOCR — quan trọng với layout dạng bảng "Nhãn : Giá trị" hay song
@@ -248,7 +280,12 @@ def run_ocr_on_pdf(file_bytes):
         page = doc.load_page(page_num)
         # Scale 3x thay vì 2x để giữ được chi tiết chữ nhỏ trên văn bằng scan
         pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-        processed = _preprocess_page_for_ocr(pix)
+        gray = _pix_to_gray(pix)
+        gray = _phat_hien_va_xoay(gray, reader)
+        gray = cv2.bilateralFilter(gray, 9, 75, 75)
+        processed = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+        )
         results = reader.readtext(processed, detail=1, paragraph=False)
         # Mỗi phần tử: (bbox, text, confidence)
         results = [r for r in results if r[2] >= MUC_TIN_CAY_TOI_THIEU]
@@ -277,7 +314,15 @@ _TU_HANH_CHINH_KHONG_PHAI_TEN = [
     # bị lệch (VD do OCR đọc layout bảng/cột sai thứ tự). Coi đây là 1 lớp
     # chặn riêng, độc lập với chuyện OCR đọc đúng/sai ký tự.
     "sinh viên", "học viên", "họ và tên", "họ tên",
+    # "Student"/"Mã sinh viên" — nhãn tiếng Anh/số hiệu, hay đứng ngay sau
+    # "sinh viên" trên văn bằng song ngữ (VD "Mã sinh viên / Student ID:").
+    # Nếu OCR bỏ sót dấu "/" (glyph rất mảnh, dễ mất), "Student ID" sẽ dính
+    # liền sau "sinh viên" và bị bắt nhầm làm tên (bug thật đã gặp).
+    "student", "ma sinh vien", "ma so sinh vien",
 ]
+# Các từ NGẮN (dễ trùng ngẫu nhiên nếu so khớp chuỗi con) chỉ chặn khi đứng
+# NGUYÊN 1 TỪ trong tên trích xuất được, không chặn nếu chỉ là 1 phần của từ khác.
+_TU_NGAN_KHONG_PHAI_TEN = {"id", "no", "ma"}
 
 def _ten_hop_le(ten: str) -> bool:
     """Kiểm tra nhanh 1 cụm từ trong tên có hợp lý là tiếng Việt hay không —
@@ -295,6 +340,8 @@ def _ten_hop_le(ten: str) -> bool:
         loi = re.sub(r"[^A-Za-zÀ-ỹ]", "", tu)
         if not loi:
             continue
+        if _khong_dau(loi) in _TU_NGAN_KHONG_PHAI_TEN:
+            return False                                   # đúng nguyên 1 từ khoá ngắn bị chặn (VD "ID")
         if any(ch in _KY_TU_KHONG_PHAI_TIENG_VIET for ch in loi):
             return False                                   # có j/f/w/z -> chắc chắn sai
         if not any(ch in _NGUYEN_AM for ch in loi):
@@ -354,7 +401,9 @@ _TEN_RIENG = "(?-i:(" + _TU_TEN + r"(?:[ \t]+" + _TU_TEN + r"){1,4}))"
 _HOTEN_PATTERNS = [
     r"họ\s*(?:và|,)?\s*tên(?:\s*(?:là|sinh\s*viên|học\s*viên))?" + _LABEL_GAP + _TEN_RIENG,
     # Giấy chứng nhận/bảng điểm hay ghi nhãn "Sinh viên:" thay vì "Họ và tên:"
-    r"sinh\s*viên" + _LABEL_GAP + _TEN_RIENG,
+    # (?<!mã\s) để KHÔNG khớp nhầm vào "Mã sinh viên" (mã số sinh viên) — 1
+    # nhãn hoàn toàn khác nghĩa nhưng chứa cùng cụm từ "sinh viên" bên trong.
+    r"(?<!mã\s)sinh\s*viên" + _LABEL_GAP + _TEN_RIENG,
     # Nhiều bản sao y/chứng thực văn bằng VN ghi "Bà/Ông <Họ tên>" — khá đáng tin cậy
     r"(?:Bà|Ông)[ \t]+" + _TEN_RIENG,
 ]
@@ -390,13 +439,31 @@ _XEP_LOAI_CANON = [
 # trên văn bằng thực tế (nhiều trường dùng "Bậc đào tạo" thay vì "Trình độ")
 # — cần nhận diện cả 2 nhãn để không bỏ sót field này khi văn bằng dùng cách
 # gọi khác với tên trường trong form.
-_TRINH_DO_LABEL_KD = r"(?:trinh\s*do|bac\s*dao\s*tao)\s*[:\-]?\s*"
+_TRINH_DO_LABEL_KD = r"(?:trinh\s*do(?:\s*dao\s*tao)?|bac\s*dao\s*tao)\s*[:\-]?\s*"
+
+# ── Điểm trung bình tích lũy (GPA) — trích từ bảng điểm nếu có ──
+# Ưu tiên thang điểm 10 nếu có ghi rõ, vì đây là thang mặc định của form.
+_GPA_10_PAT = r"(?:diem\s*tbctl|cgpa|diem\s*trung\s*binh\s*chung\s*tich\s*luy)\s*\(?\s*thang\s*diem\s*10\)?.{0,40}?(\d{1,2}[,\.]\d{1,2})"
+_GPA_4_PAT = r"(?:diem\s*tbctl|cgpa|diem\s*trung\s*binh\s*chung\s*tich\s*luy)\s*\(?\s*thang\s*diem\s*4\)?.{0,40}?(\d[,\.]\d{1,2})"
 _TRINH_DO_CANON = [
     ("tien si", "Tiến sĩ"), ("doctor", "Tiến sĩ"), ("phd", "Tiến sĩ"),
     ("thac si", "Thạc sĩ"), ("master", "Thạc sĩ"),
     ("dai hoc", "Đại học"), ("bachelor", "Đại học"), ("cu nhan", "Đại học"),
     ("cao dang", "Cao đẳng"), ("college", "Cao đẳng"),
 ]
+
+# "Nơi sinh" — dùng lại cấu trúc bắt cụm từ-viết-hoa (_TEN_RIENG) giống họ tên,
+# vì địa danh VN cũng viết hoa từng từ (VD "Thanh Hóa", "Hà Nội").
+_NOI_SINH_PATTERNS = [
+    r"nơi\s*sinh" + _LABEL_GAP + _TEN_RIENG,
+    r"place\s*of\s*birth" + _LABEL_GAP + _TEN_RIENG,
+]
+
+# Điểm trung bình chung toàn khóa (GPA/CGPA/Điểm TBCTL) — bảng điểm thường
+# ghi CẢ 2 thang (hệ 10 và hệ 4) trên 2 dòng riêng; ưu tiên lấy dòng có ghi rõ
+# "10"/"10-scale" để map đúng vào thang điểm /10 của form (chuẩn hơn, phổ biến
+# hơn hệ 4). Nếu chỉ có 1 thang thì lấy thang đó.
+_DIEM_TB_LABEL_KD = r"(?:diem\s*tbctl|cgpa|diem\s*trung\s*binh\s*chung|gpa)"
 
 
 def _match_canon(text_kd: str, canon_list, window: str = None):
@@ -424,7 +491,8 @@ _KNOWN_SCHOOLS = [
 ]
 _KNOWN_MAJORS = [
     "Hệ thống thông tin quản lý", "Management Information System",
-    "Tài chính Ngân hàng", "Banking and Finance", "International Finance",
+    "Tài chính Ngân hàng", "Banking and Finance", "Finance and Banking", "International Finance",
+    "Phân tích tài chính", "Financial Analysis",
     "Quản trị Kinh doanh", "Business Administration",
     "International Business Management", "Business Management",
     "Kế toán", "Accounting",
@@ -432,6 +500,33 @@ _KNOWN_MAJORS = [
     "Kinh doanh Tổng hợp", "General Business",
     "Luật kinh tế", "Kinh tế chính trị",
 ]
+
+# Đánh dấu điểm BẮT ĐẦU bảng điểm (danh sách môn học) — nếu văn bằng có kèm
+# bảng điểm (rất phổ biến khi gộp chung nhiều giấy tờ trong 1 PDF), KHÔNG được
+# quét từ điển Trường/Chuyên ngành xuyên qua toàn bộ bảng điểm — vì tên môn
+# học (VD "Kế toán quản trị", "Luật 1", "Nguyên lý kế toán / Accounting
+# Principles"...) rất dễ bị khớp NHẦM thành chuyên ngành thật của ứng viên
+# (lỗi thật đã gặp: 1 dòng môn học chứa từ "Accounting" bị lấy nhầm làm
+# chuyên ngành, trong khi chuyên ngành thật là "Tài chính - Ngân hàng").
+_MOC_BANG_DIEM_KD = ["ten hoc phan", "mon hoc / subject", "danh sach mon hoc"]
+
+
+def _truoc_bang_diem(text: str) -> str:
+    """Cắt bớt phần bảng điểm (nếu có) — chỉ giữ lại phần TRƯỚC bảng điểm để
+    quét từ điển Trường/Chuyên ngành, tránh khớp nhầm vào tên môn học."""
+    text_kd = _khong_dau(text)
+    vi_tri_som_nhat = None
+    for moc in _MOC_BANG_DIEM_KD:
+        idx = text_kd.find(moc)
+        if idx != -1 and (vi_tri_som_nhat is None or idx < vi_tri_som_nhat):
+            vi_tri_som_nhat = idx
+    if vi_tri_som_nhat is None:
+        return text
+    # text_kd và text lệch độ dài do chuẩn hoá khoảng trắng — cắt theo TỶ LỆ
+    # vị trí tương đối là đủ chính xác cho mục đích này (chỉ cần cắt trước
+    # bảng điểm, không cần chính xác tuyệt đối từng ký tự).
+    ty_le = vi_tri_som_nhat / max(len(text_kd), 1)
+    return text[: int(len(text) * ty_le) + 200]  # +200 ký tự đệm an toàn
 
 
 def _chua_tu(candidate: str, text: str) -> bool:
@@ -500,7 +595,7 @@ def extract_diploma_fields(raw_text: str) -> dict:
 
     text_kd = _khong_dau(text)  # bản không dấu, dùng chung cho các so khớp bên dưới
 
-    m = re.search(_XEP_LOAI_LABEL_KD + r"(.{0,25})", text_kd)
+    m = re.search(_XEP_LOAI_LABEL_KD + r"(.{0,50})", text_kd)
     if m:
         xep_loai = _match_canon(text_kd, _XEP_LOAI_CANON, window=m.group(1))
         if xep_loai:
@@ -514,7 +609,7 @@ def extract_diploma_fields(raw_text: str) -> dict:
     if van_bang:
         result["van_bang"] = van_bang
 
-    m = re.search(_TRINH_DO_LABEL_KD + r"(.{0,20})", text_kd)
+    m = re.search(_TRINH_DO_LABEL_KD + r"(.{0,50})", text_kd)
     if m:
         trinh_do = _match_canon(text_kd, _TRINH_DO_CANON, window=m.group(1))
         if trinh_do:
@@ -522,10 +617,13 @@ def extract_diploma_fields(raw_text: str) -> dict:
 
     # Trường / Chuyên ngành: so khớp từ điển thay vì bắt theo nhãn — vì nhãn
     # "Trường:"/"Ngành:" trên văn bằng thật rất hay bị OCR nuốt mất.
-    truong = _dict_match(text, _KNOWN_SCHOOLS)
+    # QUAN TRỌNG: chỉ quét trong phần TRƯỚC bảng điểm (nếu văn bằng có kèm
+    # bảng điểm) — tránh khớp nhầm tên môn học thành chuyên ngành thật.
+    text_truoc_bang_diem = _truoc_bang_diem(text)
+    truong = _dict_match(text_truoc_bang_diem, _KNOWN_SCHOOLS)
     if truong:
         result["truong"] = truong
-    nganh = _dict_match(text, _KNOWN_MAJORS)
+    nganh = _dict_match(text_truoc_bang_diem, _KNOWN_MAJORS)
     if nganh:
         result["chuyen_nganh"] = nganh
 
@@ -534,11 +632,24 @@ def extract_diploma_fields(raw_text: str) -> dict:
         df_rules = get_recruitment_rules()
         if "truong" not in result:
             for _, row in df_rules.iterrows():
-                if _chua_tu(str(row["Truong_Dai_Hoc"]), text):
+                if _chua_tu(str(row["Truong_Dai_Hoc"]), text_truoc_bang_diem):
                     result["truong"] = row["Truong_Dai_Hoc"]
                     break
     except Exception:
         pass
+
+    # Điểm trung bình tích lũy (GPA) — lấy từ bảng điểm nếu có, KHÔNG giới hạn
+    # trước bảng điểm (ngược lại với Trường/Chuyên ngành) vì dòng "Điểm TBCTL"
+    # luôn nằm ở phần TỔNG KẾT sau bảng điểm, không phải trong bảng.
+    m10 = re.search(_GPA_10_PAT, text_kd)
+    if m10:
+        result["diem_tong_ket"] = m10.group(1).replace(",", ".")
+        result["thang_diem"] = "/10"
+    else:
+        m4 = re.search(_GPA_4_PAT, text_kd)
+        if m4:
+            result["diem_tong_ket"] = m4.group(1).replace(",", ".")
+            result["thang_diem"] = "/4"
 
     return result
 
@@ -769,7 +880,10 @@ else:
                 # diện được từ khoá tiếng Anh — chỉ là phải map ngược về tên tiếng Việt.
                 _NHOM_MAJORS = {
                     "Khối ngành Kinh tế - Quản lý": {
-                        "Tài chính Ngân hàng": ["Tài chính Ngân hàng", "Banking and Finance", "International Finance"],
+                        "Tài chính Ngân hàng": [
+                            "Tài chính Ngân hàng", "Banking and Finance", "Finance and Banking",
+                            "International Finance", "Phân tích tài chính", "Financial Analysis",
+                        ],
                         "Kế toán": ["Kế toán", "Accounting"],
                         "Quản trị Kinh doanh": [
                             "Quản trị Kinh doanh", "Business Administration",
@@ -825,6 +939,12 @@ else:
                     m = _map_option(fields["xep_loai"], _XEP_LOAI_OPT)
                     if m:
                         st.session_state[f"cm_rank_{first_cm_idx}"] = m
+
+                # Điểm tổng kết (GPA) — lấy từ bảng điểm nếu có
+                if fields.get("diem_tong_ket"):
+                    st.session_state[f"cm_gpa_{first_cm_idx}"] = fields["diem_tong_ket"]
+                    if fields.get("thang_diem"):
+                        st.session_state[f"cm_gpa_scale_{first_cm_idx}"] = fields["thang_diem"]
 
                 # Chuyên ngành: thử khớp vào 1 trong các nhóm có sẵn; nếu không
                 # khớp được nhóm nào thì đẩy sang "Khác" + điền text tự do
@@ -896,7 +1016,7 @@ else:
 
         c1, c2, c3 = st.columns(3)
         with c1: dob     = st.text_input("Ngày sinh (DD/MM/YYYY):*", key="form_dob", placeholder="Ví dụ: 07/04/2002")
-        with c2: pob     = st.text_input("Nơi sinh:*", value="")
+        with c2: pob     = st.text_input("Nơi sinh:*", key="form_noi_sinh")
         with c3: address = st.text_input("Địa chỉ hiện tại:*", value="")
 
         c1, c2, c3 = st.columns(3)
