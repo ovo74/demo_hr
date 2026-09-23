@@ -230,20 +230,15 @@ _ROTATE_MAP = {
 }
 
 
-def _phat_hien_va_xoay(gray, reader):
-    """Tự động phát hiện chiều xoay đúng của trang (0/90/180/270°) rồi trả về
-    ảnh đã xoay đúng chiều. Nhiều tài liệu ghép từ CamScanner (đặc biệt khi
-    gộp ảnh dọc + ngang vào 1 PDF) bị lưu sai chiều — OCR trên ảnh sai chiều
-    gần như luôn ra rác hoàn toàn, dù chữ trên ảnh gốc rất rõ.
-
-    Cách làm: quét thử ở độ phân giải THẤP (rẻ, nhanh) tại cả 4 hướng, chấm
-    điểm mỗi hướng bằng tổng (độ tin cậy × số ký tự) nhận diện được — hướng
-    đúng luôn cho điểm vượt trội vì hướng sai gần như không đọc ra chữ có
-    nghĩa nào. Sau đó áp đúng hướng thắng cuộc lên ảnh gốc (độ phân giải cao)
-    để OCR thật."""
+def _phat_hien_goc_xoay(gray, reader):
+    """Tự động phát hiện chiều xoay đúng của trang (0/90/180/270°) — quét thử
+    ở độ phân giải THẤP (rẻ, nhanh) để tiết kiệm thời gian. Chỉ dùng để chọn
+    GÓC XOAY (rất rõ ràng đúng/sai dù ảnh nhỏ hay lớn), KHÔNG dùng để chọn
+    kiểu tiền xử lý ảnh (xem _chon_tien_xu_ly) — vì việc đó cần OCR thật ở
+    đúng độ phân giải cao mới đáng tin cậy."""
     best_angle, best_score = 0, -1
     h, w = gray.shape
-    scale = min(1.0, 900 / max(h, w))  # ảnh thử nhỏ để quét nhanh
+    scale = min(1.0, 900 / max(h, w))
     small = cv2.resize(gray, (int(w * scale), int(h * scale))) if scale < 1.0 else gray
 
     for angle, rot_code in _ROTATE_MAP.items():
@@ -255,18 +250,49 @@ def _phat_hien_va_xoay(gray, reader):
         score = sum(conf * len(text) for _bbox, text, conf in results)
         if score > best_score:
             best_score, best_angle = score, angle
+    return best_angle
 
-    rot_code = _ROTATE_MAP[best_angle]
-    return cv2.rotate(gray, rot_code) if rot_code is not None else gray
+
+def _chon_tien_xu_ly(gray, reader):
+    """Sau khi đã xoay đúng chiều, chạy OCR THẬT (đúng độ phân giải cao sẽ
+    dùng để trích xuất) với CẢ 2 kiểu tiền xử lý — ảnh xám thuần và ảnh đã
+    nhị phân hoá thích ứng — rồi chọn kiểu cho điểm cao hơn.
+
+    QUAN TRỌNG: không được chọn kiểu tiền xử lý dựa trên ảnh thu nhỏ rồi áp
+    lên ảnh gốc — đã kiểm chứng thực tế điều này cho kết quả không đáng tin
+    cậy (kiểu thắng ở ảnh nhỏ có thể thua ở ảnh lớn, gây hồi quy trên văn
+    bằng vốn đang hoạt động tốt). Chấp nhận chạy OCR 2 lần ở độ phân giải
+    cao để đổi lấy việc chọn đúng — nhị phân hoá giúp ích với mộc đỏ đè lên
+    chữ, nhưng phản tác dụng với nền hoa văn/hoạ tiết phức tạp.
+
+    Trả về (ảnh đã xử lý, kết quả readtext) — tái dùng kết quả này cho bước
+    trích xuất chính, khỏi phải OCR lại lần 3."""
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+    nhi_phan = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
+
+    ung_vien = [("xam", gray), ("nhi_phan", nhi_phan)]
+    best_img, best_results, best_score = gray, [], -1
+    for _ten, img in ung_vien:
+        try:
+            results = reader.readtext(img, detail=1, paragraph=False)
+        except Exception:
+            continue
+        score = sum(conf * len(text) for _bbox, text, conf in results)
+        if score > best_score:
+            best_score, best_img, best_results = score, img, results
+    return best_img, best_results
 
 
 def run_ocr_on_pdf(file_bytes):
-    """Quét toàn bộ PDF (mỗi trang scale 3x + tiền xử lý ảnh) và ghép text.
-    Dùng detail=1 để lấy cả toạ độ (bbox) lẫn độ tin cậy (confidence) của từng
-    cụm chữ EasyOCR nhận diện được:
-      - Tự động phát hiện & xoay đúng chiều từng trang trước khi OCR chính
-        (xem _phat_hien_va_xoay) — quan trọng với PDF ghép nhiều ảnh có
-        trang bị xoay ngang/lộn ngược.
+    """Quét toàn bộ PDF (mỗi trang scale 3x + tự chọn hướng xoay & tiền xử lý
+    ảnh phù hợp) và ghép text. Dùng detail=1 để lấy cả toạ độ (bbox) lẫn độ
+    tin cậy (confidence) của từng cụm chữ EasyOCR nhận diện được:
+      - Tự động phát hiện & xoay đúng chiều từng trang (ước lượng nhanh trên
+        ảnh thu nhỏ — xem _phat_hien_goc_xoay).
+      - Sau khi xoay đúng, tự chọn kiểu tiền xử lý phù hợp bằng cách chạy
+        OCR thật ở độ phân giải đầy đủ với cả 2 kiểu rồi lấy kiểu tốt hơn
+        (xem _chon_tien_xu_ly) — quan trọng vì kết quả ở ảnh nhỏ không phản
+        ánh đúng kết quả ở ảnh lớn.
       - Loại bỏ cụm có độ tin cậy quá thấp (rác/ký tự đọc sai).
       - Dựng lại đúng thứ tự đọc theo toạ độ thay vì tin thứ tự mặc định của
         EasyOCR — quan trọng với layout dạng bảng "Nhãn : Giá trị" hay song
@@ -281,12 +307,12 @@ def run_ocr_on_pdf(file_bytes):
         # Scale 3x thay vì 2x để giữ được chi tiết chữ nhỏ trên văn bằng scan
         pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
         gray = _pix_to_gray(pix)
-        gray = _phat_hien_va_xoay(gray, reader)
-        gray = cv2.bilateralFilter(gray, 9, 75, 75)
-        processed = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
-        )
-        results = reader.readtext(processed, detail=1, paragraph=False)
+
+        goc = _phat_hien_goc_xoay(gray, reader)
+        rot_code = _ROTATE_MAP[goc]
+        gray_dung_huong = cv2.rotate(gray, rot_code) if rot_code is not None else gray
+
+        _anh_da_chon, results = _chon_tien_xu_ly(gray_dung_huong, reader)
         # Mỗi phần tử: (bbox, text, confidence)
         results = [r for r in results if r[2] >= MUC_TIN_CAY_TOI_THIEU]
         extracted_text += _dung_lai_thu_tu_doc(results) + "\n"
@@ -865,6 +891,10 @@ else:
                     ]
                     if any(k in _khong_dau(fields["truong"]) for k in _TRUONG_CONG_LAP_KEYWORDS):
                         st.session_state[f"cm_school_type_{first_cm_idx}"] = "Trường Công lập đào tạo trong nước"
+                        # Trường công lập trong nước -> chắc chắn Quốc gia = Việt Nam,
+                        # theo đúng logic tương tự (đã nhận diện được là 1 trong 4
+                        # trường NEU/FTU/AOF/BA thì đồng thời cũng biết luôn quốc gia).
+                        st.session_state[f"cm_country_{first_cm_idx}"] = "Việt Nam"
 
                 _TRINH_DO_OPT = ["Đại học", "Cao đẳng", "Thạc sĩ", "Tiến sĩ"]
                 _VAN_BANG_OPT = ["Cử nhân", "Kỹ sư"]
@@ -964,13 +994,8 @@ else:
                         st.session_state[f"cm_group_{first_cm_idx}"] = "Khác"
                         st.session_state[f"cm_major_text_{first_cm_idx}"] = fields["chuyen_nganh"]
 
-                with st.expander("🔍 Nhật ký hệ thống — Dữ liệu chữ OCR trích xuất được"):
-                    st.text(raw_text.strip() if raw_text.strip() else "[Không nhận diện được ký tự nào trên văn bằng]")
-                    if fields:
-                        st.markdown("**Các trường đã tự động nhận diện & điền sẵn vào form bên dưới:**")
-                        st.json(fields)
-                    else:
-                        st.warning("Không trích xuất được trường thông tin có cấu trúc nào — vui lòng tự điền form thủ công.")
+                st.session_state.ocr_raw_text = raw_text
+                st.session_state.ocr_fields = fields
 
                 st.rerun()
 
@@ -1000,6 +1025,21 @@ else:
                 Vui lòng tự điền đầy đủ thông tin bên dưới bằng tay.
             </div>
         """, unsafe_allow_html=True)
+
+    # Mục debug này đặt NGOÀI khối xử lý OCR 1-lần phía trên (không nằm chung
+    # với st.rerun()) — để LUÔN xem lại được sau khi trang tải lại, không chỉ
+    # đúng khoảnh khắc vừa quét xong (trước đây bị st.rerun() xoá mất ngay lập
+    # tức, khiến mục này thực chất chưa từng hiển thị được cho người dùng).
+    if st.session_state.ocr_status is not None:
+        with st.expander("🔍 Nhật ký hệ thống — Dữ liệu chữ OCR trích xuất được"):
+            raw = st.session_state.get("ocr_raw_text", "")
+            st.text(raw.strip() if raw.strip() else "[Không nhận diện được ký tự nào trên văn bằng]")
+            ocr_fields = st.session_state.get("ocr_fields")
+            if ocr_fields:
+                st.markdown("**Các trường đã tự động nhận diện & điền sẵn vào form bên dưới:**")
+                st.json(ocr_fields)
+            else:
+                st.warning("Không trích xuất được trường thông tin có cấu trúc nào — vui lòng tự điền form thủ công.")
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -1297,6 +1337,7 @@ else:
     if st.sidebar.button("Đăng xuất (Reset Test)"):
         for key in ["logged_in", "user_email", "ung_vien_id",
                     "ocr_status", "ocr_school", "ocr_major", "ocr_prefilled_file",
+                    "ocr_raw_text", "ocr_fields",
                     "form_ten", "form_ho", "form_dob",
                     "cm_items", "nn_items", "cm_counter", "nn_counter"]:
             if key in st.session_state:
